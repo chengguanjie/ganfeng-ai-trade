@@ -93,23 +93,37 @@ def _calc_market(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
 
 
 def _calc_growth(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
-    """增速（20%） - 0-10 分。优先看 Google Trends 关键词同比增速。"""
+    """增速（20%） - 0-10 分。
+
+    主信号是同比增速：Google Trends 的同比只有在关键词搜索量足够大时才可信，
+    否则退回 Comtrade 的真实进口额同比（见 free_data_sources.score_one_sku）。
+    再叠加一个 ±0.5 分的微调，反映该品类在 Trends 里的相对需求强度——绝对
+    同比不可信，但「哪个品类被搜得更多」这个相对排序是可用的。
+    """
     sku_trend = agg.score_one_sku(sku)
     yoy = sku_trend["yoy_change_pct"] or 0.0
     if yoy >= 15:
-        score = 9.5
+        base = 9.5
     elif yoy >= 10:
-        score = 8.5
+        base = 8.5
     elif yoy >= 6:
-        score = 7.5
+        base = 7.5
     elif yoy >= 3:
-        score = 6.5
+        base = 6.5
     elif yoy >= 0:
-        score = 5.5
+        base = 5.5
     else:
-        score = 4.0
+        base = 4.0
+
+    percentile = sku_trend.get("demand_percentile", 0.5)
+    adjust = round((percentile - 0.5) * 1.0, 2)
+    score = min(10.0, max(1.0, base + adjust))
+
     return score, {
         "trend_yoy_change_pct": yoy,
+        "base_score": base,
+        "demand_percentile": percentile,
+        "demand_adjust": adjust,
         "trend_score_0_100": round(sku_trend["trend_score"] * 10, 1),
         "matched_keyword": sku_trend.get("matched_keyword"),
         "growth_basis": sku_trend.get("growth_basis"),

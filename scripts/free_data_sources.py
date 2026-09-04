@@ -394,11 +394,13 @@ class WITSAdapter(BaseSource):
     name = "wits_tariff_701959_v2"
     ttl = 7 * 24 * 3600
     label = "World Bank WITS"
-    THROTTLE = float(os.environ.get("WITS_THROTTLE", "0.3"))
+    # WITS 在高频访问下会快速返回 403 限流，间隔要给足
+    THROTTLE = float(os.environ.get("WITS_THROTTLE", "2.0"))
     YEARS = [2021, 2020, 2022]   # 实测 2021 有数据，2022 无（返回 404）
     PROBE_REPORTER = 840         # 美国，报数最全
-    REQ_TIMEOUT = int(os.environ.get("WITS_TIMEOUT", "15"))
-    budget = 150.0
+    # WITS 单次响应实测稳定在 26-29 秒，超时必须给足，否则一个都拿不到
+    REQ_TIMEOUT = int(os.environ.get("WITS_TIMEOUT", "45"))
+    budget = 420.0
 
     def _query(self, reporter_num: int, year: int) -> float | None:
         url = (
@@ -631,7 +633,9 @@ class GoogleTrendsAdapter(BaseSource):
     ttl = 12 * 3600
     label = "Google Trends"
     ANCHOR = TREND_KEYWORDS[0]
-    MIN_VOLUME = 5.0
+    # 归一化后均值低于 20 的词，周度序列里大量是 0 和个位数，同比纯属抽样噪声。
+    # 实测 "drywall joint tape" 均值 11.4 就能算出 +90% 的假增长。
+    MIN_VOLUME = 20.0
 
     def _fetch_live(self) -> dict[str, Any]:
         from pytrends.request import TrendReq  # 延迟导入，未安装时走降级
@@ -810,14 +814,28 @@ class DataAggregator:
             (("alkali", "抗碱"), "alkali resistant mesh"),
         ]
         hit_kw = "fiberglass mesh"
+        matched = False
         haystack = f"{name} {scen}".lower()
         for needles, kw in rules:
             if any(n in haystack for n in needles):
                 hit_kw = kw
+                matched = True
                 break
 
         t = trends.get(hit_kw) or trends["fiberglass mesh"]
         comtrade_yoy = comtrade["yoy_growth_pct"]
+
+        # 该关键词的相对需求强度（在 8 个词里的分位），用于给增速做小幅微调。
+        # 绝对同比不可信，但「哪个品类被搜得更多」这个相对排序是可用的。
+        # 没命中任何规则的 SKU 会落到默认锚点词（搜索量最高），不能让它因此
+        # 白拿满分位，一律按中位处理。
+        if matched:
+            all_scores = sorted(v.get("score", 0) for v in trends.values())
+            my_score = t.get("score", 0)
+            below = sum(1 for s in all_scores if s < my_score)
+            percentile = below / max(1, len(all_scores) - 1)
+        else:
+            percentile = 0.5
 
         # Trends 同比可信就用它，否则退回 Comtrade 的真实进口增速
         trend_yoy = t.get("yoy_change_pct")
@@ -832,6 +850,7 @@ class DataAggregator:
             "matched_keyword": hit_kw,
             "trend_score": min(10.0, t["score"] / 10.0),
             "trend_confidence": t.get("confidence", "n/a"),
+            "demand_percentile": round(percentile, 2),
             "yoy_change_pct": growth_yoy,
             "growth_basis": growth_basis,
             "global_import_usd_billion": comtrade["global_import_usd_billion"],

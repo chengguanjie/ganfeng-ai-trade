@@ -61,13 +61,37 @@ def q(sql: str) -> str:
     return "".join(out)
 
 
+CONNECT_RETRIES = int(os.environ.get("DB_CONNECT_RETRIES", "3"))
+
+
+def _pg_connect() -> Any:
+    """建立 Postgres 连接，对瞬时断连重试。
+
+    走公网地址时服务端偶发 "server closed the connection unexpectedly"，
+    重试一次即可恢复；用 Zeabur 内网地址时基本不会触发。
+    """
+    import psycopg
+
+    last: Exception | None = None
+    for attempt in range(CONNECT_RETRIES):
+        try:
+            return psycopg.connect(DATABASE_URL, connect_timeout=15)
+        except Exception as e:
+            last = e
+            if attempt < CONNECT_RETRIES - 1:
+                import time
+
+                time.sleep(0.5 * (attempt + 1))
+                logger.warning("数据库连接失败，重试 %d/%d: %s",
+                               attempt + 1, CONNECT_RETRIES - 1, str(e)[:120])
+    raise last  # type: ignore[misc]
+
+
 @contextmanager
 def connect() -> Iterator[Any]:
     """获取数据库连接（上下文管理，自动 commit / rollback / close）。"""
     if IS_PG:
-        import psycopg
-
-        conn = psycopg.connect(DATABASE_URL, connect_timeout=15)
+        conn = _pg_connect()
     else:
         os.makedirs(os.path.dirname(SQLITE_FILE), exist_ok=True)
         conn = sqlite3.connect(SQLITE_FILE, timeout=15)
