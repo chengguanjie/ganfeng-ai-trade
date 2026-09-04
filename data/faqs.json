@@ -1,0 +1,46 @@
+{
+  "version": "2026-09-04",
+  "language": "mixed-zh-en",
+  "faqs": [
+    {"category": "product_basics", "q_zh": "什么是玻纤网格布？", "q_en": "What is fiberglass mesh?", "a_zh": "玻纤网格布是以中碱或无碱玻璃纤维纱为基材，经织造、表面涂覆抗碱乳液或高分子材料而成的增强网状材料。主要用于建筑外墙保温、防水、GRC 增强等场景。", "intent": "product_intro", "tags": ["basic", "intro"]},
+    {"category": "product_basics", "q_zh": "克重不同有什么区别？", "q_en": "Difference between 75g / 145g / 200g / 220g?", "a_zh": "克重越高，单位面积含纱量越多，抗拉强度越好。75-120g 主要用于石膏板接缝；145-160g 用于外墙保温；200g 以上用于防水或重载增强场景。", "intent": "spec_consult", "tags": ["gram_weight"]},
+    {"category": "product_basics", "q_zh": "网孔尺寸怎么选？", "q_en": "How to choose mesh size?", "a_zh": "常规推荐 4x4mm 到 5x5mm，覆盖 80% 外墙保温场景。2-3mm 适合薄抹灰，6-10mm 适合防水或 GRC 重载，10mm+ 仅用于特种工业。", "intent": "spec_consult", "tags": ["mesh_size"]},
+
+    {"category": "application", "q_zh": "外墙保温推荐哪款？", "q_en": "Which mesh for external wall insulation?", "a_zh": "推荐 145g-160g 抗碱网格布（GF-AR-145-44、GF-WP-160-55），是 EIFS/ETICS 系统全球通用规格，海外项目接受度最高。", "intent": "recommend", "tags": ["ewi", "eifs"]},
+    {"category": "application", "q_zh": "防水卷材用什么规格？", "q_en": "Mesh for waterproofing membrane?", "a_zh": "SBS/APP 改性沥青卷材推荐 160g 防水增强网格布（GF-WP-160-55）或 280g 重型屋面增强网格布（GF-RF-280-1010），需与沥青相容。", "intent": "recommend", "tags": ["waterproofing"]},
+    {"category": "application", "q_zh": "石膏板接缝用什么？", "q_en": "Tape for drywall joint?", "a_zh": "推荐 75g 自粘玻纤接缝带（GF-SA-75-33）或 120g 内墙接缝网格带（GF-IN-120-44），自带背胶、施工效率高。", "intent": "recommend", "tags": ["drywall"]},
+    {"category": "application", "q_zh": "海洋工程用什么？", "q_en": "Mesh for marine engineering?", "a_zh": "推荐 200g 海洋工程防腐网格布（GF-MR-200-77），采用耐盐碱涂层，已通过 ASTM B117 1000h 盐雾测试。", "intent": "recommend", "tags": ["marine"]},
+    {"category": "application", "q_zh": "GRC 装饰件用什么？", "q_en": "Mesh for GRC?", "a_zh": "推荐 220g GRC 永久增强网格布（GF-GR-220-88），抗碱率 ≥99%，是欧美装饰构件行业标准配置。", "intent": "recommend", "tags": ["grc"]},
+    {"category": "application", "q_zh": "光伏组件能用吗？", "q_en": "Can mesh be used in solar PV?", "a_zh": "可以。推荐 180g 光伏组件增强网格布（GF-PV-180-66），主要用于光伏背板与海上光伏平台增强。", "intent": "recommend", "tags": ["solar"]},
+
+    {"category": "moq", "q_zh": "最小起订量是多少？", "q_en": "What's your MOQ?", "a_zh": "常规规格 MOQ 为 200 卷（约 1 个 20GP 集装箱）。自粘接缝带与定制产品 MOQ 为 500-1000 卷。首次合作可协商小批量试单 100 卷。", "intent": "moq_quote", "tags": ["moq"]},
+    {"category": "moq", "q_zh": "能小批量试单吗？", "q_en": "Can I trial order?", "a_zh": "可以。新客户首单 MOQ 可放宽至 100 卷（约半柜），样卷免费（限 5 卷内）。", "intent": "moq_quote", "tags": ["trial"]},
+    {"category": "moq", "q_zh": "样品怎么收？", "q_en": "How to get samples?", "a_zh": "免费提供 5 卷以内样品（DHL 运费由客户承担，3-5 个工作日送达；中国境内包顺丰）。", "intent": "sample", "tags": ["sample"]},
+
+    {"category": "logistics", "q_zh": "货交到哪里？", "q_en": "Which Incoterms do you support?", "a_zh": "支持 FOB、CIF、CFR、EXW、DDP。其中 FOB 宁波/上海是最常用条款，可整柜或拼箱。", "intent": "logistics", "tags": ["incoterms"]},
+    {"category": "logistics", "q_zh": "一个 20GP 装多少？", "q_en": "Loading quantity of 20GP?", "a_zh": "常规 145g / 160g 网格布 20GP 约 12000-14000 平米（140-160 卷），自粘接缝带约 8000 卷。40HQ 装量为 20GP 的 2 倍。", "intent": "logistics", "tags": ["loading"]},
+    {"category": "logistics", "q_zh": "海运时效？", "q_zh": "海运时效？", "q_en": "How long is sea transit?", "a_zh": "中东 18-22 天、欧洲 28-35 天、东南亚 5-10 天、拉美 35-45 天、非洲 30-40 天。", "intent": "logistics", "tags": ["transit"]},
+
+    {"category": "payment", "q_zh": "付款方式？", "q_en": "Payment terms?", "a_zh": "首次合作 30% T/T 预付 + 70% 见提单副本。老客户可申请 30/70、40/60 或 O/A 60 天。信用证 L/C at sight 可接受。", "intent": "payment", "tags": ["payment"]},
+    {"category": "payment", "q_zh": "支持信用证吗？", "q_en": "Do you accept L/C?", "a_zh": "支持即期信用证 L/C at sight，开证行为中国主要国有银行受理的即可，建议金额 ≥ USD 30,000。", "intent": "payment", "tags": ["lc"]},
+
+    {"category": "quality", "q_zh": "有什么认证？", "q_en": "What certifications do you have?", "a_zh": "工厂已通过 ISO 9001:2015 质量管理体系、ISO 14001:2015 环境管理体系。产品通过 CE、RoHS 认证。第三方 SGS/BV 测试报告可按客户要求出具。", "intent": "cert", "tags": ["cert"]},
+    {"category": "quality", "q_zh": "抗碱率多少？", "q_en": "Alkali resistance rate?", "a_zh": "外墙保温系列抗碱保留率 ≥95%，GRC 系列 ≥99%，海工系列 ≥98%（依据 ASTM E2098/ETAG 004 测试）。", "intent": "spec_consult", "tags": ["alkali"]},
+    {"category": "quality", "q_zh": "抗拉强度？", "q_en": "Tensile strength?", "a_zh": "常规规格经向 ≥1300N/50mm，纬向 ≥1500N/50mm（依据 EN 13496/EN 13497 测试方法）。", "intent": "spec_consult", "tags": ["tensile"]},
+
+    {"category": "supply", "q_zh": "年产能多少？", "q_en": "Annual production capacity?", "a_zh": "工厂现有 12 条织造线 + 5 条涂层线，年产能 8000 吨（约 800 万平米），可承接大批量订单。", "intent": "supply", "tags": ["capacity"]},
+    {"category": "supply", "q_zh": "交期多长？", "q_en": "Lead time?", "a_zh": "常规规格 15-25 天，加急订单 10 天可发（加 10% 加急费）。定制产品 25-35 天。", "intent": "supply", "tags": ["lead_time"]},
+    {"category": "supply", "q_zh": "能做 OEM 吗？", "q_en": "Do you offer OEM?", "a_zh": "支持。客户 LOGO、品牌名称、专有包装均可定制。OEM 起订量 1000 卷起。", "intent": "oem", "tags": ["oem"]},
+
+    {"category": "market", "q_zh": "你们主销哪些国家？", "q_en": "Which countries are your main markets?", "a_zh": "目前主要出口沙特、阿联酋、越南、印度、巴西、土耳其、德国、英国。中东与东南亚占 60% 销量，欧洲占 25%，其他 15%。", "intent": "company", "tags": ["market"]},
+    {"category": "market", "q_zh": "能帮忙开发当地市场吗？", "q_en": "Do you help develop local markets?", "a_zh": "可以。对新区域独家经销商，我们提供样品支持、技术培训、展会共同参展。市场保护政策按国别独家代理执行。", "intent": "channel", "tags": ["agent"]},
+
+    {"category": "post_sale", "q_zh": "售后怎么处理？", "q_en": "After-sales service?", "a_zh": "到货 30 天内出现非人为质量问题，我方 100% 包退换或返工。常规订单提供 2 年质量保证。", "intent": "aftersale", "tags": ["warranty"]},
+    {"category": "post_sale", "q_zh": "退货怎么处理？", "q_en": "Return policy?", "a_zh": "海外退货运费由责任方承担。我方问题全额承担运费 + 货值。30 天内可发起质量申诉。", "intent": "aftersale", "tags": ["return"]},
+
+    {"category": "general", "q_zh": "工厂在哪里？", "q_en": "Where is your factory?", "a_zh": "工厂位于江西省赣州市，距离宁波港约 600 公里，距离深圳港约 500 公里，可同时辐射华东与华南出口。", "intent": "company", "tags": ["location"]},
+    {"category": "general", "q_zh": "成立多久？", "q_en": "Company history?", "a_zh": "公司成立于 2008 年，专注玻纤网格布的研发、生产与外贸出口 18 年，已服务全球 50+ 国家、超 300 家海外客户。", "intent": "company", "tags": ["history"]},
+    {"category": "general", "q_zh": "可以视频验厂吗？", "q_en": "Can I do a video factory tour?", "a_zh": "可以，支持 WhatsApp/WeChat 视频验厂，也可安排第三方验货（SGS/BV），费用由客户承担。", "intent": "company", "tags": ["audit"]},
+    {"category": "general", "q_zh": "有英文网站吗？", "q_en": "Do you have an English website?", "a_zh": "有的，请访问 gf-fiberglass.com（演示版），可浏览产品目录、技术参数与报价请求入口。", "intent": "company", "tags": ["website"]}
+  ]
+}

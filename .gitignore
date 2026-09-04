@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据库
+data/trade.db
+data/sourcing_cache.json
+
+# 系统
+.DS_Store
+*.log
+
+# IDE
+.vscode/
+.idea/

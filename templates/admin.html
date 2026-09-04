@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>赣丰玻纤 · 数据飞轮管理后台</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="admin-wrap">
+  <a href="/" class="admin-link">← 返回独立站</a>
+
+  <div class="admin-header">
+    <h1>📊 数据飞轮管理后台 <span class="admin-tag">V5</span></h1>
+    <button onclick="refreshAll()" class="btn-primary">🔄 刷新数据</button>
+  </div>
+
+  <!-- ========== Stats Cards ========== -->
+  <div class="admin-grid">
+    <div class="admin-stat">
+      <div class="label">📋 累计询盘</div>
+      <div class="num" id="stat-inq">—</div>
+      <div class="change">↑ 实时统计</div>
+    </div>
+    <div class="admin-stat">
+      <div class="label">👥 累计客户</div>
+      <div class="num" id="stat-cust">—</div>
+      <div class="change">↑ 实时统计</div>
+    </div>
+    <div class="admin-stat">
+      <div class="label">🆕 新询盘（待处理）</div>
+      <div class="num" id="stat-new">—</div>
+      <div class="change" style="color:var(--warm)">⚠ 待跟进</div>
+    </div>
+    <div class="admin-stat">
+      <div class="label">💬 AI 客服对话数</div>
+      <div class="num" id="stat-chat">—</div>
+      <div class="change">↑ 自动答复</div>
+    </div>
+  </div>
+
+  <!-- ========== Sourcing Score Table ========== -->
+  <div class="admin-section">
+    <h2>🤖 选品评分 · 12 SKU × 6 维</h2>
+    <table class="admin-table" id="sourcing-table">
+      <thead>
+        <tr>
+          <th>排名</th><th>SKU</th><th>名称</th>
+          <th>总分</th><th>市场</th><th>增速</th><th>匹配</th><th>毛利</th><th>壁垒</th><th>出海</th>
+          <th>Tier</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="11" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- ========== Recent Inquiries ========== -->
+  <div class="admin-section">
+    <h2>📋 最新询盘</h2>
+    <table class="admin-table" id="inq-table">
+      <thead>
+        <tr>
+          <th>#</th><th>客户</th><th>国家</th><th>SKU</th>
+          <th>需求卷数</th><th>状态</th><th>时间</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="7" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- ========== Country Distribution ========== -->
+  <div class="admin-section">
+    <h2>🌍 询盘国家分布</h2>
+    <div id="country-chart">
+      <div class="loading">加载中...</div>
+    </div>
+  </div>
+
+  <!-- ========== Data Sources ========== -->
+  <div class="admin-section">
+    <h2>📊 数据源状态 · 6 通道</h2>
+    <table class="admin-table" id="ds-table">
+      <thead>
+        <tr><th>数据源</th><th>类型</th><th>状态</th><th>触发</th><th>周期</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>🇺🇳 UN Comtrade</td><td>海关贸易</td><td><span style="color:var(--green)">●</span> 在线</td><td>WorkBuddy 抓取</td><td>每周一</td></tr>
+        <tr><td>📈 Google Trends</td><td>搜索趋势</td><td><span style="color:var(--green)">●</span> 在线</td><td>pytrends 自动</td><td>每日</td></tr>
+        <tr><td>🌍 World Bank WITS</td><td>关税/壁垒</td><td><span style="color:var(--green)">●</span> 在线</td><td>API 实时</td><td>每周一</td></tr>
+        <tr><td>🏭 阿里国际站</td><td>B2B 平台</td><td><span style="color:var(--green)">●</span> 在线（需店铺）</td><td>爬虫+WorkBuddy</td><td>每日</td></tr>
+        <tr><td>🔍 Google Search SERP</td><td>关键词</td><td><span style="color:var(--green)">●</span> 在线</td><td>scrapling</td><td>每周</td></tr>
+        <tr><td>📑 行业报告</td><td>研究报告</td><td><span style="color:var(--green)">●</span> 在线</td><td>PDF 解析</td><td>每月</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ========== Feishu Schema ========== -->
+  <div class="admin-section">
+    <h2>🪶 飞书多维表格 · 5 张主表</h2>
+    <table class="admin-table">
+      <thead>
+        <tr><th>表名</th><th>字段数</th><th>同步方式</th><th>示例记录</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>products</td><td>10</td><td>SQLite → lark-base</td><td>12 SKU 已导入</td></tr>
+        <tr><td>customers</td><td>10</td><td>询盘提交即写入</td><td>3 样本客户</td></tr>
+        <tr><td>inquiries</td><td>12</td><td>询盘提交即写入</td><td>3 样本询盘</td></tr>
+        <tr><td>sourcing_scores</td><td>11</td><td>评分后批量写入</td><td>12 SKU 评分已记录</td></tr>
+        <tr><td>knowledge_base</td><td>7</td><td>导入 30+ FAQ</td><td>30 条 FAQ</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:14px;padding:14px;background:var(--brand-light);border-radius:8px;font-size:13px;color:var(--brand-2)">
+      💡 <strong>飞书对接：</strong> 在工作目录运行 <code style="background:#fff;padding:2px 6px;border-radius:3px">python scripts/feishu_sync.py</code>，
+      配合 <code style="background:#fff;padding:2px 6px;border-radius:3px">LARK_DRY_RUN=false</code> + lark-base 凭证即可同步。
+    </div>
+  </div>
+
+  <!-- ========== Automation Rules ========== -->
+  <div class="admin-section">
+    <h2>⚡ 飞书自动化规则</h2>
+    <table class="admin-table">
+      <thead>
+        <tr><th>触发类型</th><th>触发条件</th><th>动作</th><th>接收方</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>新询盘通知</td><td>独立站表单提交</td><td>推飞书群消息 + @责任人</td><td>外贸部群</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+        <tr><td>周报推送</td><td>每周一 09:00</td><td>生成 Top 3 推荐 + 推送</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+        <tr><td>24h 未回复预警</td><td>询盘 24h 未跟进</td><td>黄色预警 @业务员</td><td>业务员</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+        <tr><td>72h 未回复升级</td><td>询盘 72h 未跟进</td><td>红色预警升级到经理</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+        <tr><td>AI 客服意图高意向</td><td>用户提问命中 buy/rfq</td><td>自动转人工 + 邮件提醒</td><td>业务员邮箱</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+async function loadDashboard(){
+  const dash = await fetch('/api/dashboard').then(r => r.json());
+  document.getElementById('stat-inq').textContent = dash.stats.total_inquiries;
+  document.getElementById('stat-cust').textContent = dash.stats.total_customers;
+  document.getElementById('stat-new').textContent = dash.stats.new_inquiries;
+  document.getElementById('stat-chat').textContent = dash.stats.total_chats;
+
+  // 询盘表格
+  const inqTbody = document.querySelector('#inq-table tbody');
+  if (dash.recent_inquiries.length === 0){
+    inqTbody.innerHTML = '<tr><td colspan="7" class="loading">暂无询盘</td></tr>';
+  } else {
+    inqTbody.innerHTML = dash.recent_inquiries.map(i => `
+      <tr>
+        <td>#${i.id}</td>
+        <td>${i.customer}</td>
+        <td>${i.country || '—'}</td>
+        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px">${i.sku || '—'}</code></td>
+        <td>${i.qty || '—'}</td>
+        <td><span class="tier-badge tier-T1" style="background:var(--brand-light);color:var(--brand)">${i.status}</span></td>
+        <td>${(i.created_at || '').substring(0, 16)}</td>
+      </tr>
+    `).join('');
+  }
+
+  // 国家分布
+  const max = Math.max(...dash.country_distribution.map(c => c.count), 1);
+  document.getElementById('country-chart').innerHTML = dash.country_distribution.length === 0
+    ? '<div class="loading">暂无国家数据</div>'
+    : dash.country_distribution.map(c => `
+      <div class="country-bar">
+        <div class="cb-name">${c.country}</div>
+        <div class="cb-track"><div class="cb-fill" style="width:${(c.count/max*100).toFixed(0)}%"></div></div>
+        <div class="cb-num">${c.count}</div>
+      </div>
+    `).join('');
+}
+
+async function loadSourcing(){
+  const data = await fetch('/api/sourcing').then(r => r.json());
+  const tbody = document.querySelector('#sourcing-table tbody');
+  if (!data.scores || data.scores.length === 0){
+    tbody.innerHTML = '<tr><td colspan="11" class="loading">暂无数据</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.scores.map((r, i) => {
+    const d = r.dimensions;
+    return `
+      <tr>
+        <td><strong>#${i+1}</strong></td>
+        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px">${r.sku}</code></td>
+        <td>${r.name_zh}</td>
+        <td><span style="font-size:18px;font-weight:800;color:var(--brand)">${r.total_score}</span></td>
+        <td>${d.market.score}</td>
+        <td>${d.growth.score}</td>
+        <td>${d.fit.score}</td>
+        <td>${d.margin.score}</td>
+        <td>${d.barrier.score}</td>
+        <td>${d.sea.score}</td>
+        <td><span class="tier-badge tier-${r.tier}">${r.tier}</span></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function refreshAll(){
+  await loadDashboard();
+  await loadSourcing();
+}
+
+document.addEventListener('DOMContentLoaded', refreshAll);
+setInterval(refreshAll, 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "build_command": "pip install -r requirements.txt",
+  "start_command": "gunicorn --workers=2 --threads=4 --bind=0.0.0.0:$PORT --timeout=120 app:app"
+}
