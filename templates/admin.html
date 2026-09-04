@@ -5,6 +5,61 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>赣丰玻纤 · 数据飞轮管理后台</title>
 <link rel="stylesheet" href="/static/css/style.css">
+<style>
+  .admin-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 22px}
+  .admin-tab{border:1px solid var(--line);background:#fff;padding:10px 22px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;color:var(--ink-2);transition:.15s}
+  .admin-tab:hover{border-color:var(--brand);color:var(--brand)}
+  .admin-tab.active{background:var(--brand);border-color:var(--brand);color:#fff;box-shadow:0 4px 12px rgba(30,107,255,.25)}
+  .admin-panel{display:none}
+  .admin-panel.active{display:block;animation:fadeIn .2s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
+  .kpi-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .kpi-card .label{font-size:12px;color:var(--ink-3);margin-bottom:6px}
+  .kpi-card .num{font-size:24px;font-weight:800;color:var(--ink);line-height:1.2}
+  .kpi-card .delta{font-size:11px;margin-top:4px;font-weight:600}
+  .delta.up{color:var(--green)} .delta.down{color:#e24b4a} .delta.flat{color:var(--ink-3)}
+  .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .bar-row .b-name{width:120px;font-size:12px;color:var(--ink-2);text-align:right;flex-shrink:0}
+  .bar-row .b-track{flex:1;height:18px;background:var(--bg);border-radius:9px;overflow:hidden}
+  .bar-row .b-fill{height:100%;border-radius:9px;background:linear-gradient(90deg,#1e6bff,#4d9aff);transition:width .4s}
+  .bar-row .b-fill.warm{background:linear-gradient(90deg,#ff6b1a,#ffa03d)}
+  .bar-row .b-fill.green{background:linear-gradient(90deg,#10b981,#4ade80)}
+  .bar-row .b-fill.purple{background:linear-gradient(90deg,#8b5cf6,#c4b5fd)}
+  .bar-row .b-num{width:60px;font-size:12px;font-weight:700;color:var(--ink-2);flex-shrink:0}
+  .trend-chart{display:flex;align-items:flex-end;gap:3px;height:120px;padding:8px 0;border-bottom:1px solid var(--line);margin-bottom:4px}
+  .trend-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:2px;position:relative}
+  .trend-col .t-bar{width:100%;max-width:26px;background:linear-gradient(180deg,#4d9aff,#1e6bff);border-radius:3px 3px 0 0;transition:height .4s}
+  .trend-col .t-bar.ctr{background:linear-gradient(180deg,#ffd28a,#ff9a3d)}
+  .trend-col:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#0f1d2e;color:#fff;font-size:11px;padding:4px 8px;border-radius:6px;white-space:nowrap;z-index:5}
+  .trend-x{display:flex;gap:3px}
+  .trend-x span{flex:1;text-align:center;font-size:9px;color:var(--ink-3)}
+  .badge-opt{background:var(--warm-light);color:var(--warm);font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}
+  .badge-ok{background:var(--green-light);color:var(--green);font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}
+  .funnel{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+  .funnel-stage{display:flex;align-items:center;gap:12px}
+  .funnel-stage .f-label{width:110px;font-size:13px;font-weight:600;text-align:right}
+  .funnel-stage .f-track{flex:1;height:30px;background:var(--bg);border-radius:8px;overflow:hidden}
+  .funnel-stage .f-fill{height:100%;display:flex;align-items:center;padding-left:10px;color:#fff;font-size:12px;font-weight:700;border-radius:8px;transition:width .4s}
+  .sugg-list{list-style:none;padding:0;margin:0}
+  .sugg-list li{background:var(--brand-light);border-left:3px solid var(--brand);border-radius:6px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:var(--brand-2)}
+  .action-btns{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+  .btn-warm{background:linear-gradient(135deg,#ff6b1a,#ff9a3d);color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(255,107,26,.3)}
+  .btn-ghost2{background:#fff;border:1px solid var(--line);border-radius:8px;padding:9px 18px;font-size:13px;cursor:pointer;color:var(--ink-2);font-weight:600}
+  .btn-ghost2:hover{border-color:var(--brand);color:var(--brand)}
+  .modal-mask{position:fixed;inset:0;background:rgba(15,29,46,.45);display:none;align-items:center;justify-content:center;z-index:100}
+  .modal-mask.show{display:flex}
+  .modal-box{background:#fff;border-radius:14px;max-width:680px;width:92%;max-height:75vh;overflow-y:auto;padding:24px}
+  .chat-msg{border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:13px;line-height:1.6;max-width:85%}
+  .chat-msg.user{background:var(--brand-light);margin-right:auto;color:var(--ink)}
+  .chat-msg.bot{background:var(--bg);margin-left:auto;color:var(--ink-2);white-space:pre-wrap}
+  .chat-meta{font-size:10px;color:var(--ink-3);margin-bottom:4px}
+  .opt-diff{font-size:12px;border:1px dashed var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+  .opt-diff .old{color:#e24b4a;text-decoration:line-through;opacity:.75}
+  .opt-diff .new{color:var(--green);font-weight:600}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:860px){.grid-2{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
 
@@ -12,134 +67,628 @@
   <a href="/" class="admin-link">← 返回独立站</a>
 
   <div class="admin-header">
-    <h1>📊 数据飞轮管理后台 <span class="admin-tag">V5</span></h1>
-    <button onclick="refreshAll()" class="btn-primary">🔄 刷新数据</button>
+    <h1>📊 数据飞轮管理后台 <span class="admin-tag">V8</span></h1>
+    <button onclick="refreshActiveTab()" class="btn-primary">🔄 刷新当前模块</button>
   </div>
 
-  <!-- ========== Stats Cards ========== -->
-  <div class="admin-grid">
-    <div class="admin-stat">
-      <div class="label">📋 累计询盘</div>
-      <div class="num" id="stat-inq">—</div>
-      <div class="change">↑ 实时统计</div>
-    </div>
-    <div class="admin-stat">
-      <div class="label">👥 累计客户</div>
-      <div class="num" id="stat-cust">—</div>
-      <div class="change">↑ 实时统计</div>
-    </div>
-    <div class="admin-stat">
-      <div class="label">🆕 新询盘（待处理）</div>
-      <div class="num" id="stat-new">—</div>
-      <div class="change" style="color:var(--warm)">⚠ 待跟进</div>
-    </div>
-    <div class="admin-stat">
-      <div class="label">💬 AI 客服对话数</div>
-      <div class="num" id="stat-chat">—</div>
-      <div class="change">↑ 自动答复</div>
-    </div>
+  <!-- ========== Tabs ========== -->
+  <div class="admin-tabs">
+    <div class="admin-tab active" onclick="switchTab('sourcing', this)">🤖 选品分析</div>
+    <div class="admin-tab" onclick="switchTab('seo', this)">🔍 SEO 推广驾驶舱</div>
+    <div class="admin-tab" onclick="switchTab('chat', this)">💬 智能客服分析</div>
+    <div class="admin-tab" onclick="switchTab('ops', this)">⚙️ 运营总览</div>
   </div>
 
-  <!-- ========== Sourcing Score Table ========== -->
-  <div class="admin-section">
-    <h2>🤖 选品评分 · 12 SKU × 6 维 + AI 推荐</h2>
-    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
-      <button onclick="refreshSourcing()" class="btn-primary" style="font-size:13px;padding:7px 14px">🤖 重新评分（AI 生成推荐理由）</button>
-      <span style="font-size:12px;color:var(--ink-3)" id="sourcing-status">缓存数据（6h 刷新一次）</span>
+  <!-- ========== Tab 1: 选品分析 ========== -->
+  <div class="admin-panel active" id="panel-sourcing">
+    <div class="kpi-grid" id="src-kpi"></div>
+
+    <div class="admin-section">
+      <h2>🚀 一键选品更新到网页</h2>
+      <p style="font-size:13px;color:var(--ink-2);margin-bottom:12px">
+        按最新 6 维评分自动挑选 Top SKU，一键推送到独立站首页推荐位（置顶 + 🔥 标识），访客优先看到高评分产品。
+      </p>
+      <div class="action-btns">
+        <select id="publish-count" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
+          <option value="4">Top 4</option>
+          <option value="6" selected>Top 6</option>
+          <option value="8">Top 8</option>
+          <option value="12">全部 12 款</option>
+        </select>
+        <button class="btn-warm" onclick="publishProducts()">🚀 一键发布 Top SKU 到首页</button>
+        <button class="btn-ghost2" onclick="refreshSourcing(true)">🤖 重新评分（AI 生成推荐理由）</button>
+        <span id="publish-msg" style="font-size:13px;color:var(--green);font-weight:600;align-self:center"></span>
+      </div>
+      <div id="publish-log" style="font-size:12px;color:var(--ink-3);margin-top:6px"></div>
     </div>
-    <table class="admin-table" id="sourcing-table">
-      <thead>
-        <tr>
-          <th>排名</th><th>SKU</th><th>名称</th>
-          <th>总分</th><th>市场</th><th>增速</th><th>匹配</th><th>毛利</th><th>壁垒</th><th>出海</th>
-          <th>Tier</th><th>AI 推荐理由</th><th>目标市场</th><th>建议动作</th>
-        </tr>
-      </thead>
-      <tbody><tr><td colspan="14" class="loading">加载中...</td></tr></tbody>
-    </table>
-  </div>
 
-  <!-- ========== Recent Inquiries ========== -->
-  <div class="admin-section">
-    <h2>📋 最新询盘</h2>
-    <table class="admin-table" id="inq-table">
-      <thead>
-        <tr>
-          <th>#</th><th>客户</th><th>国家</th><th>SKU</th>
-          <th>需求卷数</th><th>状态</th><th>时间</th>
-        </tr>
-      </thead>
-      <tbody><tr><td colspan="7" class="loading">加载中...</td></tr></tbody>
-    </table>
-  </div>
+    <div class="grid-2">
+      <div class="admin-section">
+        <h2>📈 Tier 分布 & 评分趋势</h2>
+        <div id="src-tier-bars"></div>
+        <div id="src-trend" style="margin-top:14px"></div>
+      </div>
+      <div class="admin-section">
+        <h2>🧭 六维平均分 & AI 选品建议</h2>
+        <div id="src-dim-bars"></div>
+        <ul class="sugg-list" id="src-suggestions" style="margin-top:14px"></ul>
+      </div>
+    </div>
 
-  <!-- ========== Country Distribution ========== -->
-  <div class="admin-section">
-    <h2>🌍 询盘国家分布</h2>
-    <div id="country-chart">
-      <div class="loading">加载中...</div>
+    <div class="admin-section">
+      <h2>🤖 选品评分 · 12 SKU × 6 维 + AI 推荐</h2>
+      <table class="admin-table" id="sourcing-table">
+        <thead>
+          <tr>
+            <th>排名</th><th>SKU</th><th>名称</th>
+            <th>总分</th><th>市场</th><th>增速</th><th>匹配</th><th>毛利</th><th>壁垒</th><th>出海</th>
+            <th>Tier</th><th>AI 推荐理由</th><th>目标市场</th><th>建议动作</th><th>首页</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="15" class="loading">加载中...</td></tr></tbody>
+      </table>
     </div>
   </div>
 
-  <!-- ========== Data Sources ========== -->
-  <div class="admin-section">
-    <h2>📊 数据源状态 · 6 通道</h2>
-    <table class="admin-table" id="ds-table">
-      <thead>
-        <tr><th>数据源</th><th>类型</th><th>状态</th><th>触发</th><th>周期</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>🇺🇳 UN Comtrade</td><td>海关贸易</td><td><span style="color:var(--green)">●</span> 在线</td><td>WorkBuddy 抓取</td><td>每周一</td></tr>
-        <tr><td>📈 Google Trends</td><td>搜索趋势</td><td><span style="color:var(--green)">●</span> 在线</td><td>pytrends 自动</td><td>每日</td></tr>
-        <tr><td>🌍 World Bank WITS</td><td>关税/壁垒</td><td><span style="color:var(--green)">●</span> 在线</td><td>API 实时</td><td>每周一</td></tr>
-        <tr><td>🏭 阿里国际站</td><td>B2B 平台</td><td><span style="color:var(--green)">●</span> 在线（需店铺）</td><td>爬虫+WorkBuddy</td><td>每日</td></tr>
-        <tr><td>🔍 Google Search SERP</td><td>关键词</td><td><span style="color:var(--green)">●</span> 在线</td><td>scrapling</td><td>每周</td></tr>
-        <tr><td>📑 行业报告</td><td>研究报告</td><td><span style="color:var(--green)">●</span> 在线</td><td>PDF 解析</td><td>每月</td></tr>
-      </tbody>
-    </table>
-  </div>
+  <!-- ========== Tab 2: SEO 推广驾驶舱 ========== -->
+  <div class="admin-panel" id="panel-seo">
+    <div class="kpi-grid" id="seo-kpi"></div>
 
-  <!-- ========== Feishu Schema ========== -->
-  <div class="admin-section">
-    <h2>🪶 飞书多维表格 · 5 张主表</h2>
-    <table class="admin-table">
-      <thead>
-        <tr><th>表名</th><th>字段数</th><th>同步方式</th><th>示例记录</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>products</td><td>10</td><td>SQLite → lark-base</td><td>12 SKU 已导入</td></tr>
-        <tr><td>customers</td><td>10</td><td>询盘提交即写入</td><td>3 样本客户</td></tr>
-        <tr><td>inquiries</td><td>12</td><td>询盘提交即写入</td><td>3 样本询盘</td></tr>
-        <tr><td>sourcing_scores</td><td>11</td><td>评分后批量写入</td><td>12 SKU 评分已记录</td></tr>
-        <tr><td>knowledge_base</td><td>7</td><td>导入 30+ FAQ</td><td>30 条 FAQ</td></tr>
-      </tbody>
-    </table>
-    <div style="margin-top:14px;padding:14px;background:var(--brand-light);border-radius:8px;font-size:13px;color:var(--brand-2)">
-      💡 <strong>飞书对接：</strong> 在工作目录运行 <code style="background:#fff;padding:2px 6px;border-radius:3px">python scripts/feishu_sync.py</code>，
-      配合 <code style="background:#fff;padding:2px 6px;border-radius:3px">LARK_DRY_RUN=false</code> + lark-base 凭证即可同步。
+    <div class="action-btns">
+      <button class="btn-warm" onclick="seoOptimize()">⚡ 执行一轮自动优化（低 CTR 页面重写）</button>
+      <button class="btn-ghost2" onclick="seoSimulateDay()">📅 模拟推进一天数据</button>
+      <span id="seo-action-msg" style="font-size:13px;color:var(--green);font-weight:600;align-self:center"></span>
+    </div>
+
+    <div class="admin-section">
+      <h2>📉 30 天流量趋势（曝光 / 点击）</h2>
+      <div id="seo-trend"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="admin-section">
+        <h2>🏆 关键词排名分布</h2>
+        <div id="seo-rank-bars"></div>
+        <h2 style="margin-top:20px">🧭 关键词四层矩阵</h2>
+        <div id="seo-layer-bars"></div>
+      </div>
+      <div class="admin-section">
+        <h2>🌍 GEO 品牌提及监测（AI 引擎）</h2>
+        <p style="font-size:12px;color:var(--ink-3);margin-bottom:10px" id="geo-rate"></p>
+        <div style="max-height:300px;overflow-y:auto">
+          <table class="admin-table" id="geo-table">
+            <thead><tr><th>监测问题</th><th>引擎</th><th>品牌提及</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>📄 页面表现 & 优化队列（近 7 天）</h2>
+      <table class="admin-table" id="seo-pages-table">
+        <thead>
+          <tr><th>页面</th><th>Title</th><th>曝光</th><th>点击</th><th>CTR</th><th>平均排名</th><th>状态</th><th>最近优化</th></tr>
+        </thead>
+        <tbody><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="grid-2">
+      <div class="admin-section">
+        <h2>🔑 关键词库（按搜索量）</h2>
+        <div style="max-height:360px;overflow-y:auto">
+          <table class="admin-table" id="seo-keywords-table">
+            <thead><tr><th>关键词</th><th>层级</th><th>目标页面</th><th>月搜索量</th><th>竞争度</th><th>排名</th></tr></thead>
+            <tbody><tr><td colspan="6" class="loading">加载中...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="admin-section">
+        <h2>⚙️ 自动优化历史（改写前后对比）</h2>
+        <div id="seo-opt-history" style="max-height:360px;overflow-y:auto"><div class="loading">加载中...</div></div>
+      </div>
     </div>
   </div>
 
-  <!-- ========== Automation Rules ========== -->
-  <div class="admin-section">
-    <h2>⚡ 飞书自动化规则</h2>
-    <table class="admin-table">
-      <thead>
-        <tr><th>触发类型</th><th>触发条件</th><th>动作</th><th>接收方</th><th>状态</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>新询盘通知</td><td>独立站表单提交</td><td>推飞书群消息 + @责任人</td><td>外贸部群</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
-        <tr><td>周报推送</td><td>每周一 09:00</td><td>生成 Top 3 推荐 + 推送</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
-        <tr><td>24h 未回复预警</td><td>询盘 24h 未跟进</td><td>黄色预警 @业务员</td><td>业务员</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
-        <tr><td>72h 未回复升级</td><td>询盘 72h 未跟进</td><td>红色预警升级到经理</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
-        <tr><td>AI 客服意图高意向</td><td>用户提问命中 buy/rfq</td><td>自动转人工 + 邮件提醒</td><td>业务员邮箱</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
-      </tbody>
-    </table>
+  <!-- ========== Tab 3: 智能客服分析 ========== -->
+  <div class="admin-panel" id="panel-chat">
+    <div class="kpi-grid" id="chat-kpi"></div>
+
+    <div class="grid-2">
+      <div class="admin-section">
+        <h2>🎯 转化漏斗（对话 → 高意向 → 询盘）</h2>
+        <div class="funnel" id="chat-funnel"></div>
+        <p style="font-size:12px;color:var(--ink-3)">💡 高意向定义：会话中出现询价 / 样品 / 求推荐 / OEM / 交期任一意图</p>
+      </div>
+      <div class="admin-section">
+        <h2>🧭 意图分布（用户消息）</h2>
+        <div id="chat-intent-bars"></div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="admin-section">
+        <h2>📊 14 天会话趋势</h2>
+        <div id="chat-trend"></div>
+      </div>
+      <div class="admin-section">
+        <h2>❓ 高频问题 Top 10 <small style="font-size:11px;color:var(--ink-3)">（反哺 SEO 内容选题）</small></h2>
+        <div id="chat-topq"></div>
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>💬 会话记录（点击查看完整对话）</h2>
+      <table class="admin-table" id="chat-sessions-table">
+        <thead>
+          <tr><th>会话</th><th>首条消息</th><th>意图</th><th>消息数</th><th>意向等级</th><th>开始时间</th><th></th></tr>
+        </thead>
+        <tbody><tr><td colspan="7" class="loading">加载中...</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
+  <!-- ========== Tab 4: 运营总览（原有功能） ========== -->
+  <div class="admin-panel" id="panel-ops">
+    <div class="admin-grid">
+      <div class="admin-stat">
+        <div class="label">📋 累计询盘</div>
+        <div class="num" id="stat-inq">—</div>
+        <div class="change">↑ 实时统计</div>
+      </div>
+      <div class="admin-stat">
+        <div class="label">👥 累计客户</div>
+        <div class="num" id="stat-cust">—</div>
+        <div class="change">↑ 实时统计</div>
+      </div>
+      <div class="admin-stat">
+        <div class="label">🆕 新询盘（待处理）</div>
+        <div class="num" id="stat-new">—</div>
+        <div class="change" style="color:var(--warm)">⚠ 待跟进</div>
+      </div>
+      <div class="admin-stat">
+        <div class="label">💬 AI 客服对话数</div>
+        <div class="num" id="stat-chat">—</div>
+        <div class="change">↑ 自动答复</div>
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>📋 最新询盘</h2>
+      <table class="admin-table" id="inq-table">
+        <thead>
+          <tr><th>#</th><th>客户</th><th>国家</th><th>SKU</th><th>需求卷数</th><th>状态</th><th>时间</th></tr>
+        </thead>
+        <tbody><tr><td colspan="7" class="loading">加载中...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="admin-section">
+      <h2>🌍 询盘国家分布</h2>
+      <div id="country-chart"><div class="loading">加载中...</div></div>
+    </div>
+
+    <div class="admin-section">
+      <h2>📊 数据源状态 · 6 通道</h2>
+      <table class="admin-table">
+        <thead><tr><th>数据源</th><th>类型</th><th>状态</th><th>触发</th><th>周期</th></tr></thead>
+        <tbody>
+          <tr><td>🇺🇳 UN Comtrade</td><td>海关贸易</td><td><span style="color:var(--green)">●</span> 在线</td><td>WorkBuddy 抓取</td><td>每周一</td></tr>
+          <tr><td>📈 Google Trends</td><td>搜索趋势</td><td><span style="color:var(--green)">●</span> 在线</td><td>pytrends 自动</td><td>每日</td></tr>
+          <tr><td>🌍 World Bank WITS</td><td>关税/壁垒</td><td><span style="color:var(--green)">●</span> 在线</td><td>API 实时</td><td>每周一</td></tr>
+          <tr><td>🏭 阿里国际站</td><td>B2B 平台</td><td><span style="color:var(--green)">●</span> 在线（需店铺）</td><td>爬虫+WorkBuddy</td><td>每日</td></tr>
+          <tr><td>🔍 Google Search SERP</td><td>关键词</td><td><span style="color:var(--green)">●</span> 在线</td><td>scrapling</td><td>每周</td></tr>
+          <tr><td>📑 行业报告</td><td>研究报告</td><td><span style="color:var(--green)">●</span> 在线</td><td>PDF 解析</td><td>每月</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="admin-section">
+      <h2>🪶 飞书多维表格 · 5 张主表</h2>
+      <table class="admin-table">
+        <thead><tr><th>表名</th><th>字段数</th><th>同步方式</th><th>示例记录</th></tr></thead>
+        <tbody>
+          <tr><td>products</td><td>10</td><td>SQLite → lark-base</td><td>12 SKU 已导入</td></tr>
+          <tr><td>customers</td><td>10</td><td>询盘提交即写入</td><td>3 样本客户</td></tr>
+          <tr><td>inquiries</td><td>12</td><td>询盘提交即写入</td><td>3 样本询盘</td></tr>
+          <tr><td>sourcing_scores</td><td>11</td><td>评分后批量写入</td><td>12 SKU 评分已记录</td></tr>
+          <tr><td>knowledge_base</td><td>7</td><td>导入 30+ FAQ</td><td>30 条 FAQ</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:14px;padding:14px;background:var(--brand-light);border-radius:8px;font-size:13px;color:var(--brand-2)">
+        💡 <strong>飞书对接：</strong> 在工作目录运行 <code style="background:#fff;padding:2px 6px;border-radius:3px">python scripts/feishu_sync.py</code>，
+        配合 <code style="background:#fff;padding:2px 6px;border-radius:3px">LARK_DRY_RUN=false</code> + lark-base 凭证即可同步。
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>⚡ 飞书自动化规则</h2>
+      <table class="admin-table">
+        <thead><tr><th>触发类型</th><th>触发条件</th><th>动作</th><th>接收方</th><th>状态</th></tr></thead>
+        <tbody>
+          <tr><td>新询盘通知</td><td>独立站表单提交</td><td>推飞书群消息 + @责任人</td><td>外贸部群</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+          <tr><td>周报推送</td><td>每周一 09:00</td><td>生成 Top 3 推荐 + 推送</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+          <tr><td>24h 未回复预警</td><td>询盘 24h 未跟进</td><td>黄色预警 @业务员</td><td>业务员</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+          <tr><td>72h 未回复升级</td><td>询盘 72h 未跟进</td><td>红色预警升级到经理</td><td>外贸经理</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+          <tr><td>AI 客服意图高意向</td><td>用户提问命中 buy/rfq</td><td>自动转人工 + 邮件提醒</td><td>业务员邮箱</td><td><span style="color:var(--green)">● 已启用</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 会话详情弹窗 ========== -->
+<div class="modal-mask" id="chat-modal" onclick="if(event.target===this)closeChatModal()">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0">💬 会话详情 <span id="modal-sid" style="font-family:monospace;font-size:12px;color:var(--ink-3)"></span></h3>
+      <button onclick="closeChatModal()" style="border:none;background:var(--bg);border-radius:6px;padding:6px 12px;cursor:pointer">✕ 关闭</button>
+    </div>
+    <div id="modal-messages"></div>
+  </div>
 </div>
 
 <script>
+/* ============ Tab 切换 ============ */
+let activeTab = 'sourcing';
+function switchTab(name, el){
+  activeTab = name;
+  document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  loadTab(name);
+}
+function refreshActiveTab(){ loadTab(activeTab); }
+function loadTab(name){
+  if (name === 'sourcing') loadSourcingAnalysis();
+  else if (name === 'seo') loadSeo();
+  else if (name === 'chat') loadChatAnalytics();
+  else if (name === 'ops') loadDashboard();
+}
+
+/* ============ 工具 ============ */
+const fmtPct = v => (v * 100).toFixed(2) + '%';
+const fmtDelta = v => (v >= 0 ? '↑ +' : '↓ ') + (v * 100).toFixed(1) + '%';
+function kpiCard(label, num, delta, cls){
+  return `<div class="kpi-card"><div class="label">${label}</div><div class="num">${num}</div>
+    ${delta ? `<div class="delta ${cls || 'flat'}">${delta}</div>` : ''}</div>`;
+}
+function barRow(name, val, max, num, color){
+  const w = max > 0 ? (val / max * 100).toFixed(1) : 0;
+  return `<div class="bar-row"><div class="b-name">${name}</div>
+    <div class="b-track"><div class="b-fill ${color || ''}" style="width:${w}%"></div></div>
+    <div class="b-num">${num}</div></div>`;
+}
+function trendChart(data, valKey, tipFn, suffix){
+  if (!data || data.length === 0) return '<div class="loading">暂无数据</div>';
+  const max = Math.max(...data.map(d => d[valKey]), 1);
+  return `<div class="trend-chart">${data.map(d =>
+    `<div class="trend-col" data-tip="${tipFn(d)}"><div class="t-bar" style="height:${(d[valKey] / max * 100).toFixed(1)}%"></div></div>`
+  ).join('')}</div><div class="trend-x">${data.map((d, i) =>
+    (i % Math.ceil(data.length / 10) === 0) ? `<span>${String(d.date || '').slice(5)}</span>` : '<span></span>'
+  ).join('')}</div>${suffix || ''}`;
+}
+
+/* ============ Tab 1: 选品分析 ============ */
+let sourcingData = null;
+async function loadSourcingAnalysis(){
+  try {
+    const [ana, src] = await Promise.all([
+      fetch('/api/admin/sourcing-analysis').then(r => r.json()),
+      fetch('/api/sourcing').then(r => r.json())
+    ]);
+    sourcingData = { ana, src };
+
+    // KPI
+    const scores = ana.scores || [];
+    const t1 = ana.tier_distribution?.T1 || 0;
+    const avg = scores.length ? (scores.reduce((a, s) => a + s.total_score, 0) / scores.length).toFixed(2) : '—';
+    document.getElementById('src-kpi').innerHTML =
+      kpiCard('🥇 T1 主推 SKU', t1 + ' 款', '评分 ≥ 8.0', 'up') +
+      kpiCard('📊 平均总分', avg, `${scores.length} 款 SKU`, 'flat') +
+      kpiCard('🔥 首页推荐位', (ana.featured_skus || []).length + ' 款', '已置顶独立站', 'up') +
+      kpiCard('🕐 评分时间', '—', (src.generated_at || ana.generated_at || '').replace('T', ' ').slice(0, 16), 'flat');
+
+    // Tier 分布
+    const td = ana.tier_distribution || {};
+    const tmax = Math.max(td.T1, td.T2, td.T3, td.T4, 1);
+    document.getElementById('src-tier-bars').innerHTML =
+      barRow('T1 主推', td.T1, tmax, td.T1 + ' 款') +
+      barRow('T2 备选', td.T2, tmax, td.T2 + ' 款', 'green') +
+      barRow('T3 观察', td.T3, tmax, td.T3 + ' 款', 'warm') +
+      barRow('T4 暂缓', td.T4, tmax, td.T4 + ' 款', 'purple');
+
+    // 评分趋势
+    document.getElementById('src-trend').innerHTML =
+      '<div style="font-size:12px;color:var(--ink-3);margin-bottom:6px">全 SKU 平均总分（按评分批次）</div>' +
+      trendChart(ana.score_trend || [], 'avg_score', d => `${d.date}: ${d.avg_score}`);
+
+    // 六维平均分
+    const dim = ana.dimension_avg || {};
+    const dimDefs = [['market', '市场规模 25%'], ['growth', '增速 20%'], ['fit', '产线匹配 20%'], ['margin', '毛利率 15%'], ['barrier', '壁垒 10%'], ['sea', '出海 10%']];
+    document.getElementById('src-dim-bars').innerHTML = dimDefs.map(([k, label]) =>
+      barRow(label, dim[k] || 0, 10, (dim[k] || 0), (dim[k] || 0) >= 7.5 ? '' : 'warm')).join('');
+
+    // AI 建议
+    document.getElementById('src-suggestions').innerHTML = (ana.suggestions || [])
+      .map(s => `<li>${s}</li>`).join('') || '<li>暂无建议</li>';
+
+    // 发布日志
+    const pl = ana.publish_log || [];
+    document.getElementById('publish-log').innerHTML = pl.length
+      ? '最近发布：' + pl.map(p => `${(p.created_at || '').slice(5, 16)} 发布 ${p.skus.length} 款（${p.skus.slice(0, 3).join(', ')}${p.skus.length > 3 ? '…' : ''}）`).join('；')
+      : '尚未执行过一键发布';
+
+    // 评分表
+    loadSourcingTable(src, ana.featured_skus || []);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function loadSourcingTable(data, featured){
+  const tbody = document.querySelector('#sourcing-table tbody');
+  if (!data.scores || data.scores.length === 0){
+    tbody.innerHTML = '<tr><td colspan="15" class="loading">暂无数据</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.scores.map((r, i) => {
+    const d = r.dimensions;
+    const isFeat = featured.includes(r.sku);
+    return `
+      <tr>
+        <td><strong>#${i + 1}</strong></td>
+        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px">${r.sku}</code></td>
+        <td>${r.name_zh}</td>
+        <td><span style="font-size:18px;font-weight:800;color:var(--brand)">${r.total_score}</span></td>
+        <td>${d ? d.market.score : '—'}</td>
+        <td>${d ? d.growth.score : '—'}</td>
+        <td>${d ? d.fit.score : '—'}</td>
+        <td>${d ? d.margin.score : '—'}</td>
+        <td>${d ? d.barrier.score : '—'}</td>
+        <td>${d ? d.sea.score : '—'}</td>
+        <td><span class="tier-badge tier-${r.tier}">${r.tier}</span></td>
+        <td style="font-size:12px;color:var(--ink-2);max-width:200px">${r.ai_reason || '—'}</td>
+        <td style="font-size:12px;color:var(--green);font-weight:600">${r.target_market || '—'}</td>
+        <td style="font-size:12px;color:var(--warm)">${r.suggested_action || (r.recommend_actions ? r.recommend_actions[0] : '—')}</td>
+        <td>${isFeat ? '🔥 已置顶' : '—'}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function refreshSourcing(force){
+  const status = document.getElementById('publish-msg');
+  if (status) status.textContent = '⏳ AI 重新评分中...';
+  try {
+    await fetch('/api/sourcing?refresh=1');
+    await loadSourcingAnalysis();
+    if (status) status.textContent = '✅ 评分已更新';
+  } catch (e) {
+    if (status) status.textContent = '❌ ' + e.message;
+  }
+}
+
+async function publishProducts(){
+  const count = document.getElementById('publish-count').value;
+  const msg = document.getElementById('publish-msg');
+  msg.textContent = '⏳ 发布中...';
+  try {
+    const res = await fetch('/api/admin/publish-products', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ auto: true, count: parseInt(count), trigger: 'admin-one-click' })
+    }).then(r => r.json());
+    if (res.status === 'ok'){
+      msg.textContent = '✅ ' + res.msg;
+      await loadSourcingAnalysis();
+    } else {
+      msg.textContent = '❌ ' + (res.msg || '发布失败');
+    }
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+  }
+}
+
+/* ============ Tab 2: SEO 驾驶舱 ============ */
+let seoData = null;
+async function loadSeo(){
+  try {
+    seoData = await fetch('/api/admin/seo/overview').then(r => r.json());
+    const k = seoData.kpi || {};
+
+    document.getElementById('seo-kpi').innerHTML =
+      kpiCard('👁 7 天曝光', k.impressions_7d?.toLocaleString(), fmtDelta(k.impressions_change), k.impressions_change >= 0 ? 'up' : 'down') +
+      kpiCard('👆 7 天点击', k.clicks_7d?.toLocaleString(), fmtDelta(k.clicks_change), k.clicks_change >= 0 ? 'up' : 'down') +
+      kpiCard('📊 平均 CTR', fmtPct(k.ctr_7d), (k.ctr_change_pct >= 0 ? '+' : '') + k.ctr_change_pct + ' pp', k.ctr_change_pct >= 0 ? 'up' : 'down') +
+      kpiCard('🔑 跟踪关键词', k.tracked_keywords, 'Top 10 内 ' + k.keywords_top10 + ' 个', 'up') +
+      kpiCard('🌍 GEO 提及率', fmtPct(seoData.geo?.mention_rate), 'AI 引擎品牌被提及', 'flat') +
+      kpiCard('⚠️ 待优化页面', k.pages_need_optimization + ' 页', '高曝光低 CTR', k.pages_need_optimization > 0 ? 'down' : 'up');
+
+    // 30 天趋势
+    document.getElementById('seo-trend').innerHTML =
+      trendChart(seoData.trend_30d || [], 'impressions',
+        d => `${d.date}：曝光 ${d.impressions} / 点击 ${d.clicks} / CTR ${(d.ctr * 100).toFixed(2)}%`,
+        '<div style="font-size:11px;color:var(--ink-3);margin-top:6px">■ 每日曝光量（悬停看点击与 CTR）</div>');
+
+    // 排名分布
+    const rd = seoData.rank_distribution || {};
+    const rmax = Math.max(rd.top3, rd.top4_10, rd.top11_20, rd.beyond20, 1);
+    document.getElementById('seo-rank-bars').innerHTML =
+      barRow('Top 3', rd.top3, rmax, rd.top3 + ' 词', 'green') +
+      barRow('Top 4-10', rd.top4_10, rmax, rd.top4_10 + ' 词') +
+      barRow('Top 11-20', rd.top11_20, rmax, rd.top11_20 + ' 词', 'warm') +
+      barRow('20 名开外', rd.beyond20, rmax, rd.beyond20 + ' 词', 'purple');
+
+    // 词层分布
+    const layers = {core: '核心词', product: '产品词', longtail: '长尾词', qa: '问答词'};
+    const lmax = Math.max(...(seoData.keyword_layers || []).map(l => l.volume), 1);
+    document.getElementById('seo-layer-bars').innerHTML = (seoData.keyword_layers || []).map(l =>
+      barRow(layers[l.layer] || l.layer, l.volume, lmax, l.count + ' 词 · ' + l.volume.toLocaleString() + '/月')).join('');
+
+    // GEO
+    document.getElementById('geo-rate').textContent =
+      `最新一轮监测：${fmtPct(seoData.geo?.mention_rate || 0)} 的引擎回答提及了品牌（目标：6 个月达到 30%）`;
+    const gtbody = document.querySelector('#geo-table tbody');
+    gtbody.innerHTML = (seoData.geo?.questions || []).map(q => `
+      <tr><td style="font-size:12px">${q.question}</td><td>${q.engine}</td>
+      <td>${q.mentioned ? '<span class="badge-ok">✓ 已提及</span>' : '<span class="badge-opt">✗ 未提及</span>'}</td></tr>`).join('') ||
+      '<tr><td colspan="3" class="loading">暂无监测数据</td></tr>';
+
+    // 页面表现
+    const ptbody = document.querySelector('#seo-pages-table tbody');
+    ptbody.innerHTML = (seoData.pages || []).map(p => `
+      <tr>
+        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-size:11px">${p.path}</code></td>
+        <td style="font-size:12px;max-width:260px">${p.title}</td>
+        <td>${p.impressions}</td>
+        <td>${p.clicks}</td>
+        <td><strong style="color:${p.ctr < 0.015 ? 'var(--warm)' : 'var(--green)'}">${fmtPct(p.ctr)}</strong></td>
+        <td>${p.avg_position}</td>
+        <td>${p.needs_optimization ? '<span class="badge-opt">⚡ 待优化</span>' : '<span class="badge-ok">● 正常</span>'}</td>
+        <td style="font-size:11px;color:var(--ink-3)">${p.last_optimized || '—'}</td>
+      </tr>`).join('');
+
+    // 关键词表
+    const layerBadge = {core: ['核心词', 'var(--brand-light)'], product: ['产品词', 'var(--cyan-light)'], longtail: ['长尾词', 'var(--green-light)'], qa: ['问答词', 'var(--purple-light)']};
+    const ktbody = document.querySelector('#seo-keywords-table tbody');
+    ktbody.innerHTML = (seoData.keywords || []).map(k => {
+      const [lname, lcolor] = layerBadge[k.layer] || [k.layer, 'var(--bg)'];
+      return `<tr>
+        <td style="font-size:12px;font-weight:600">${k.keyword}</td>
+        <td><span style="background:${lcolor};padding:2px 8px;border-radius:10px;font-size:11px">${lname}</span></td>
+        <td style="font-size:11px;color:var(--ink-3)">${k.target_path}</td>
+        <td>${k.volume_month?.toLocaleString()}</td>
+        <td>${k.competition === 'high' ? '🔴 高' : k.competition === 'mid' ? '🟡 中' : '🟢 低'}</td>
+        <td><strong>${k.rank ? '#' + k.rank : '—'}</strong></td>
+      </tr>`;
+    }).join('');
+
+    // 优化历史
+    const hist = seoData.optimization_history || [];
+    document.getElementById('seo-opt-history').innerHTML = hist.length
+      ? hist.map(h => `
+        <div class="opt-diff">
+          <div style="font-size:11px;color:var(--ink-3);margin-bottom:4px">${h.applied_at} · <code style="font-size:10px">${h.path}</code> · ${h.field}</div>
+          <div class="old">${h.old_value}</div>
+          <div class="new">→ ${h.new_value}</div>
+          <div style="font-size:11px;color:var(--ink-3);margin-top:4px">${h.reason}</div>
+        </div>`).join('')
+      : '<div class="loading">尚无优化记录 — 点击上方「执行一轮自动优化」开始</div>';
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function seoOptimize(){
+  const msg = document.getElementById('seo-action-msg');
+  msg.textContent = '⏳ AI 正在诊断并重写低 CTR 页面...';
+  try {
+    const res = await fetch('/api/admin/seo/optimize', { method: 'POST' }).then(r => r.json());
+    if (res.optimized > 0){
+      msg.textContent = `✅ 已优化 ${res.optimized} 个页面（候选 ${res.candidates} 个，引擎：${res.details[0]?.engine || 'rule'}）`;
+    } else {
+      msg.textContent = `本轮无需优化（候选 ${res.candidates} 个，其余页面近期已优化或 CTR 达标）`;
+    }
+    await loadSeo();
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+  }
+}
+
+async function seoSimulateDay(){
+  const msg = document.getElementById('seo-action-msg');
+  try {
+    const res = await fetch('/api/admin/seo/simulate-day', { method: 'POST' }).then(r => r.json());
+    msg.textContent = res.status === 'ok'
+      ? `✅ 已推进到 ${res.date}（新增 ${res.pages_added} 页数据）`
+      : `今日数据已生成过（${res.date}）`;
+    await loadSeo();
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+  }
+}
+
+/* ============ Tab 3: 客服分析 ============ */
+async function loadChatAnalytics(){
+  try {
+    const data = await fetch('/api/admin/chat/analytics').then(r => r.json());
+    const k = data.kpi || {};
+
+    document.getElementById('chat-kpi').innerHTML =
+      kpiCard('💬 总会话数', k.total_sessions, `${k.total_messages} 条消息`, 'up') +
+      kpiCard('📈 户均消息', k.avg_messages_per_session, '每会话平均消息数', 'flat') +
+      kpiCard('🔥 高意向会话', k.high_intent_sessions, fmtPct(k.high_intent_rate), 'up') +
+      kpiCard('📋 转化询盘', k.chat_inquiries, `对话→询盘转化 ${fmtPct(k.chat_conversion_rate)}`, 'up') +
+      kpiCard('📊 询盘中聊天占比', fmtPct(k.inquiry_share_from_chat), '全部询盘里来自客服的比例', 'flat');
+
+    // 漏斗
+    const f = data.funnel || {};
+    const stages = [
+      ['AI 客服会话', f.chat_sessions || 0, '#1e6bff'],
+      ['高意向会话', f.high_intent || 0, '#ff6b1a'],
+      ['沉淀询盘', f.inquiries || 0, '#10b981'],
+    ];
+    const fmax = stages[0][1] || 1;
+    document.getElementById('chat-funnel').innerHTML = stages.map(([label, v, color]) => {
+      const w = Math.max(v / fmax * 100, 8);
+      const pct = fmax ? (v / fmax * 100).toFixed(1) : 0;
+      return `<div class="funnel-stage">
+        <div class="f-label">${label}</div>
+        <div class="f-track"><div class="f-fill" style="width:${w}%;background:${color}">${v}（${pct}%）</div></div>
+      </div>`;
+    }).join('');
+
+    // 意图分布
+    const intents = data.intent_distribution || [];
+    const imax = Math.max(...intents.map(i => i.count), 1);
+    document.getElementById('chat-intent-bars').innerHTML = intents.map(i =>
+      barRow(i.label, i.count, imax, i.count, ['moq_quote', 'sample', 'recommend', 'oem', 'supply'].includes(i.intent) ? 'warm' : '')).join('');
+
+    // 会话趋势
+    document.getElementById('chat-trend').innerHTML =
+      trendChart(data.daily_sessions || [], 'sessions', d => `${d.date}：${d.sessions} 个会话`);
+
+    // 高频问题
+    document.getElementById('chat-topq').innerHTML = (data.top_questions || []).map((q, i) =>
+      `<div class="bar-row"><div class="b-name" style="width:60%;text-align:left;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i + 1}. ${q.question}</div>
+       <div class="b-num" style="width:auto">${q.count} 次</div></div>`).join('') || '<div class="loading">暂无数据</div>';
+
+    // 会话表
+    const stbody = document.querySelector('#chat-sessions-table tbody');
+    stbody.innerHTML = (data.sessions || []).map(s => `
+      <tr>
+        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-size:11px">${s.session_id}</code></td>
+        <td style="font-size:12px;max-width:280px">${s.first_message}</td>
+        <td>${s.intent_label}</td>
+        <td>${s.messages}</td>
+        <td>${s.high_intent ? '<span class="badge-opt">🔥 高意向</span>' : '<span class="badge-ok">一般</span>'}</td>
+        <td style="font-size:12px;color:var(--ink-3)">${s.started_at}</td>
+        <td><button class="btn-ghost2" style="padding:4px 12px;font-size:12px" onclick="viewSession('${s.session_id}')">查看</button></td>
+      </tr>`).join('') || '<tr><td colspan="7" class="loading">暂无会话</td></tr>';
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function viewSession(sid){
+  document.getElementById('modal-sid').textContent = sid;
+  document.getElementById('modal-messages').innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById('chat-modal').classList.add('show');
+  try {
+    const data = await fetch('/api/admin/chat/session/' + sid).then(r => r.json());
+    document.getElementById('modal-messages').innerHTML = (data.messages || []).map(m => `
+      <div class="chat-msg ${m.role === 'user' ? 'user' : 'bot'}">
+        <div class="chat-meta">${m.role === 'user' ? '🧑 客户' : '🤖 AI 客服'} · ${m.time} ${m.role === 'user' && m.intent ? '· 意图: ' + m.intent : ''}</div>
+        ${m.message.replace(/</g, '&lt;')}
+      </div>`).join('');
+  } catch (e) {
+    document.getElementById('modal-messages').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+function closeChatModal(){ document.getElementById('chat-modal').classList.remove('show'); }
+
+/* ============ Tab 4: 运营总览（原有逻辑） ============ */
 async function loadDashboard(){
   const dash = await fetch('/api/dashboard').then(r => r.json());
   document.getElementById('stat-inq').textContent = dash.stats.total_inquiries;
@@ -147,92 +696,36 @@ async function loadDashboard(){
   document.getElementById('stat-new').textContent = dash.stats.new_inquiries;
   document.getElementById('stat-chat').textContent = dash.stats.total_chats;
 
-  // 询盘表格
   const inqTbody = document.querySelector('#inq-table tbody');
   if (dash.recent_inquiries.length === 0){
     inqTbody.innerHTML = '<tr><td colspan="7" class="loading">暂无询盘</td></tr>';
   } else {
     inqTbody.innerHTML = dash.recent_inquiries.map(i => `
       <tr>
-        <td>#${i.id}</td>
-        <td>${i.customer}</td>
-        <td>${i.country || '—'}</td>
+        <td>#${i.id}</td><td>${i.customer}</td><td>${i.country || '—'}</td>
         <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px">${i.sku || '—'}</code></td>
         <td>${i.qty || '—'}</td>
         <td><span class="tier-badge tier-T1" style="background:var(--brand-light);color:var(--brand)">${i.status}</span></td>
         <td>${(i.created_at || '').substring(0, 16)}</td>
-      </tr>
-    `).join('');
+      </tr>`).join('');
   }
 
-  // 国家分布
   const max = Math.max(...dash.country_distribution.map(c => c.count), 1);
   document.getElementById('country-chart').innerHTML = dash.country_distribution.length === 0
     ? '<div class="loading">暂无国家数据</div>'
     : dash.country_distribution.map(c => `
       <div class="country-bar">
         <div class="cb-name">${c.country}</div>
-        <div class="cb-track"><div class="cb-fill" style="width:${(c.count/max*100).toFixed(0)}%"></div></div>
+        <div class="cb-track"><div class="cb-fill" style="width:${(c.count / max * 100).toFixed(0)}%"></div></div>
         <div class="cb-num">${c.count}</div>
-      </div>
-    `).join('');
+      </div>`).join('');
 }
 
-async function loadSourcing(){
-  const data = await fetch('/api/sourcing').then(r => r.json());
-  const tbody = document.querySelector('#sourcing-table tbody');
-  if (!data.scores || data.scores.length === 0){
-    tbody.innerHTML = '<tr><td colspan="14" class="loading">暂无数据</td></tr>';
-    return;
-  }
-  tbody.innerHTML = data.scores.map((r, i) => {
-    const d = r.dimensions;
-    const aiReason = r.ai_reason || '—';
-    const targetMarket = r.target_market || '—';
-    const suggestedAction = r.suggested_action || '—';
-    return `
-      <tr>
-        <td><strong>#${i+1}</strong></td>
-        <td><code style="background:var(--bg);padding:2px 6px;border-radius:3px">${r.sku}</code></td>
-        <td>${r.name_zh}</td>
-        <td><span style="font-size:18px;font-weight:800;color:var(--brand)">${r.total_score}</span></td>
-        <td>${d.market.score}</td>
-        <td>${d.growth.score}</td>
-        <td>${d.fit.score}</td>
-        <td>${d.margin.score}</td>
-        <td>${d.barrier.score}</td>
-        <td>${d.sea.score}</td>
-        <td><span class="tier-badge tier-${r.tier}">${r.tier}</span></td>
-        <td style="font-size:12px;color:var(--ink-2);max-width:200px">${aiReason}</td>
-        <td style="font-size:12px;color:var(--green);font-weight:600">${targetMarket}</td>
-        <td style="font-size:12px;color:var(--warm)">${suggestedAction}</td>
-      </tr>
-    `;
-  }).join('');
-  const status = document.getElementById('sourcing-status');
-  if (status) status.textContent = '生成时间: ' + (data.generated_at || '—');
-}
-
-async function refreshSourcing(){
-  const status = document.getElementById('sourcing-status');
-  if (status) status.textContent = '⏳ AI 正在生成推荐理由...';
-  const tbody = document.querySelector('#sourcing-table tbody');
-  tbody.innerHTML = '<tr><td colspan="14" class="loading">⏳ AI 正在分析评分数据并生成推荐理由...</td></tr>';
-  try {
-    await fetch('/api/sourcing?refresh=1');
-    await loadSourcing();
-  } catch(e) {
-    if (status) status.textContent = '❌ 刷新失败: ' + e.message;
-  }
-}
-
-async function refreshAll(){
-  await loadDashboard();
-  await loadSourcing();
-}
-
-document.addEventListener('DOMContentLoaded', refreshAll);
-setInterval(refreshAll, 60000);
+/* ============ 启动 ============ */
+document.addEventListener('DOMContentLoaded', () => {
+  loadSourcingAnalysis();
+  loadDashboard();
+});
 </script>
 </body>
 </html>

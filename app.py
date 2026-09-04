@@ -15,15 +15,16 @@
    └── /             管理后台
 
 数据层：
-  - SQLite 本地（演示用）
-  - 飞书多维表格（同结构字段，待 lark-base 接入）
-  - 免费数据源（Comtrade/Trends/WITS mock + 真实接入接口）
+  - PostgreSQL（设置 DATABASE_URL 时）/ SQLite（本地开发）
+  - 飞书多维表格（真实 Open API，见 scripts/feishu_client.py）
+  - 免费数据源（Comtrade / WITS / World Bank / Google Trends 真实接入）
 """
 from __future__ import annotations
 import json
+import logging
 import os
-import sqlite3
 import sys
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -31,13 +32,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flask import Flask, request, jsonify, render_template, send_from_directory  # type: ignore
+from flask import Flask, request, jsonify, render_template  # type: ignore
 
-from init_db import init_db, insert_sample_data, DB_FILE  # type: ignore
+from db import connect, q, insert_returning_id, backend_name  # type: ignore
+from init_db import bootstrap  # type: ignore
 from sourcing_engine import score_all  # type: ignore
 from chatbot_engine import ChatbotEngine  # type: ignore
 from free_data_sources import DataAggregator  # type: ignore
 from feishu_sync import FeishuSync  # type: ignore
+import feishu_client  # type: ignore
+import seo_engine  # type: ignore
+import chat_analytics  # type: ignore
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+log = logging.getLogger("app")
 
 app = Flask(
     __name__,
@@ -45,12 +56,10 @@ app = Flask(
     static_folder=str(ROOT / "static"),
 )
 
-
 # 启动前初始化数据库
-print("[boot] initializing SQLite...")
-_conn = init_db(DB_FILE)
-insert_sample_data(_conn)
-print("[boot] OK")
+log.info("[boot] initializing database backend=%s ...", backend_name())
+bootstrap(seed=os.environ.get("SEED_SAMPLES", "true").lower() == "true")
+log.info("[boot] database ready")
 
 
 # ============================================================
@@ -76,12 +85,23 @@ def robots():
 # ============================================================
 @app.route("/api/products", methods=["GET"])
 def api_products():
-    """产品列表 - 主页/独立站展示用"""
+    """产品列表 - 主页/独立站展示用（管理后台一键发布后：推荐 SKU 置顶）"""
     lang = request.args.get("lang", "zh")
     with open(ROOT / "data" / "sku.json", "r", encoding="utf-8") as f:
         data = json.load(f)
     products = data["products"]
     company = data["company"]
+
+    # 合并数据库中的「推荐置顶」状态（一键选品发布的落点）
+    featured_map: dict[str, int] = {}
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(q("SELECT sku, featured_rank FROM products WHERE featured = 1"))
+            featured_map = {r[0]: (r[1] or 999) for r in cur.fetchall()}
+    except Exception as e:
+        log.warning("featured query failed: %s", e)
+
     out = []
     for p in products:
         out.append({
@@ -102,7 +122,12 @@ def api_products():
             "lead_time_days": p.get("lead_time_days"),
             "unit_cost_cny": p.get("unit_cost_cny"),
             "target_price_usd_per_sqm": p.get("target_price_usd_per_sqm"),
+            "featured": p["sku"] in featured_map,
+            "featured_rank": featured_map.get(p["sku"]),
         })
+
+    # 推荐 SKU 置顶（featured_rank 升序），其余保持原顺序
+    out.sort(key=lambda x: x["featured_rank"] if x["featured"] else 1000)
     return jsonify({"company": company, "products": out})
 
 
@@ -115,71 +140,86 @@ def api_inquiry():
         if not payload.get(k):
             return jsonify({"status": "error", "msg": f"missing field: {k}"}), 400
 
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
     try:
-        # 1. 写入客户
-        cur.execute(
-            """INSERT INTO customers (name, company, country, email, phone, intent)
-               VALUES (?,?,?,?,?,?)""",
-            (
-                payload.get("name", ""),
-                payload.get("company", ""),
-                payload.get("country", ""),
-                payload.get("email", ""),
-                payload.get("phone", ""),
-                payload.get("intent", "rfq"),
-            ),
-        )
-        customer_id = cur.lastrowid
+        with connect() as conn:
+            cur = conn.cursor()
+            # 1. 写入客户
+            customer_id = insert_returning_id(
+                cur,
+                """INSERT INTO customers (name, company, country, email, phone, intent)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    payload.get("name", ""),
+                    payload.get("company", ""),
+                    payload.get("country", ""),
+                    payload.get("email", ""),
+                    payload.get("phone", ""),
+                    payload.get("intent", "rfq"),
+                ),
+            )
 
-        # 2. 写入询盘
-        cur.execute(
-            """INSERT INTO inquiries (customer_id, sku, quantity_rolls, quantity_sqm, message, source)
-               VALUES (?,?,?,?,?,?)""",
-            (
-                customer_id,
-                payload.get("sku"),
-                payload.get("quantity_rolls"),
-                payload.get("quantity_sqm"),
-                payload.get("message", ""),
-                payload.get("source", "website"),
-            ),
-        )
-        inquiry_id = cur.lastrowid
-        conn.commit()
-
-        # 3. 触发飞书自动化
-        fsync = FeishuSync(DB_FILE, dry_run=True)
-        fsync.trigger_automation(
-            "new_inquiry",
-            {
-                "inquiry_id": inquiry_id,
-                "customer": payload.get("name"),
-                "country": payload.get("country"),
-                "sku": payload.get("sku"),
-                "qty": payload.get("quantity_rolls"),
-            },
-        )
-
-        # 4. 记录自动化日志
-        cur.execute(
-            "INSERT INTO automation_log (trigger_type, trigger_payload, action_taken, status) VALUES (?,?,?,?)",
-            ("new_inquiry", json.dumps(payload), "feishu-dry-run-notify", "sent"),
-        )
-        conn.commit()
-
-        return jsonify({
-            "status": "ok",
-            "inquiry_id": inquiry_id,
-            "customer_id": customer_id,
-            "msg": "感谢您的询盘！我们将在 24h 内回复。 / Inquiry received! We'll reply within 24h.",
-        })
+            # 2. 写入询盘
+            inquiry_id = insert_returning_id(
+                cur,
+                """INSERT INTO inquiries
+                   (customer_id, sku, quantity_rolls, quantity_sqm, message, source)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    customer_id,
+                    payload.get("sku"),
+                    payload.get("quantity_rolls"),
+                    payload.get("quantity_sqm"),
+                    payload.get("message", ""),
+                    payload.get("source", "website"),
+                ),
+            )
     except Exception as e:
-        conn.rollback()
+        log.exception("inquiry insert failed")
         return jsonify({"status": "error", "msg": str(e)}), 500
-    finally:
-        conn.close()
+
+    # 3. 同步飞书 + 群通知（失败不影响询盘落库）
+    record = {
+        "inquiry_id": inquiry_id,
+        "customer_id": customer_id,
+        "customer": payload.get("name"),
+        "company": payload.get("company"),
+        "country": payload.get("country"),
+        "email": payload.get("email"),
+        "phone": payload.get("phone"),
+        "sku": payload.get("sku"),
+        "qty": payload.get("quantity_rolls"),
+        "quantity_sqm": payload.get("quantity_sqm"),
+        "message": payload.get("message", ""),
+        "source": payload.get("source", "website"),
+        "intent": payload.get("intent", "rfq"),
+    }
+    try:
+        result = FeishuSync().trigger_automation("new_inquiry", record)
+        action, status = result.get("action", "feishu"), result.get("status", "unknown")
+    except Exception as e:
+        log.warning("feishu automation failed: %s", e)
+        action, status = "feishu-notify", f"error: {e}"
+
+    # 4. 记录自动化日志
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                q("""INSERT INTO automation_log
+                     (trigger_type, trigger_payload, action_taken, status)
+                     VALUES (?,?,?,?)"""),
+                ("new_inquiry", json.dumps(record, ensure_ascii=False), action, status),
+            )
+    except Exception as e:
+        log.warning("automation_log write failed: %s", e)
+
+    return jsonify({
+        "status": "ok",
+        "inquiry_id": inquiry_id,
+        "customer_id": customer_id,
+        "feishu": status,
+        "msg": "感谢您的询盘！我们将在 24h 内回复。 / Inquiry received! We'll reply within 24h.",
+    })
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -194,124 +234,437 @@ def api_chat():
     eng = ChatbotEngine()
     out = eng.reply(msg, session_id, lang=payload.get("lang"))
 
-    # 写入对话日志
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+    # 写入对话日志（日志失败不影响回复返回）
     try:
-        cur.execute(
-            "INSERT INTO chat_logs (session_id, message, role, intent) VALUES (?,?,?,?)",
-            (session_id, msg, "user", out["intent"]),
-        )
-        cur.execute(
-            "INSERT INTO chat_logs (session_id, message, role, intent) VALUES (?,?,?,?)",
-            (session_id, out["text"], "bot", out["intent"]),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        with connect() as conn:
+            cur = conn.cursor()
+            sql = q("INSERT INTO chat_logs (session_id, message, role, intent) VALUES (?,?,?,?)")
+            cur.execute(sql, (session_id, msg, "user", out["intent"]))
+            cur.execute(sql, (session_id, out["text"], "bot", out["intent"]))
+    except Exception as e:
+        log.warning("chat_log write failed: %s", e)
 
     return jsonify({"session_id": session_id, "reply": out})
 
 
+SOURCING_CACHE_KEY = "sourcing_result"
+SOURCING_TTL = int(os.environ.get("SOURCING_TTL", str(6 * 3600)))
+
+
 @app.route("/api/sourcing", methods=["GET"])
 def api_sourcing():
-    """选品评分结果（带缓存）"""
-    cache_path = ROOT / "data" / "sourcing_cache.json"
-    use_cache = request.args.get("refresh", "0") != "1"
-    if cache_path.exists() and use_cache:
-        mtime = cache_path.stat().st_mtime
-        age_seconds = (datetime.now().timestamp() - mtime)
-        if age_seconds < 60 * 60 * 6:  # 6 小时缓存
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return jsonify(json.load(f))
+    """选品评分结果（缓存在 data_cache 表，容器重启不丢）"""
+    from db import cache_get, cache_put  # 局部导入避免循环
+
+    if request.args.get("refresh", "0") != "1":
+        hit = cache_get(SOURCING_CACHE_KEY, SOURCING_TTL)
+        if hit:
+            hit["cached"] = True
+            return jsonify(hit)
 
     res = score_all()
     out = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "weights": {"market": 0.25, "growth": 0.20, "fit": 0.20, "margin": 0.15, "barrier": 0.10, "sea": 0.10},
+        "weights": {"market": 0.25, "growth": 0.20, "fit": 0.20,
+                    "margin": 0.15, "barrier": 0.10, "sea": 0.10},
         "scores": res,
+        "cached": False,
     }
 
-    # 写入数据库 + 缓存
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    for r in res:
-        cur.execute(
-            """INSERT INTO sourcing_scores
-               (sku, score_total, score_market, score_growth, score_fit,
-                score_margin, score_barrier, score_sea, tier, recommend_actions)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (
-                r["sku"], r["total_score"],
-                r["dimensions"]["market"]["score"],
-                r["dimensions"]["growth"]["score"],
-                r["dimensions"]["fit"]["score"],
-                r["dimensions"]["margin"]["score"],
-                r["dimensions"]["barrier"]["score"],
-                r["dimensions"]["sea"]["score"],
-                r["tier"],
-                json.dumps(r["recommend_actions"], ensure_ascii=False),
-            ),
-        )
-    conn.commit()
-    conn.close()
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            for r in res:
+                d = r["dimensions"]
+                cur.execute(
+                    q("""INSERT INTO sourcing_scores
+                         (sku, score_total, score_market, score_growth, score_fit,
+                          score_margin, score_barrier, score_sea, tier,
+                          recommend_actions, ai_reason, target_market)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""),
+                    (
+                        r["sku"], r["total_score"],
+                        d["market"]["score"], d["growth"]["score"], d["fit"]["score"],
+                        d["margin"]["score"], d["barrier"]["score"], d["sea"]["score"],
+                        r["tier"],
+                        json.dumps(r["recommend_actions"], ensure_ascii=False),
+                        r.get("ai_reason"), r.get("target_market"),
+                    ),
+                )
+    except Exception as e:
+        log.warning("sourcing_scores write failed: %s", e)
 
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
+    cache_put(SOURCING_CACHE_KEY, out, "ok")
     return jsonify(out)
+
+
+# ── 数据源状态 ───────────────────────────────────
+_refresh_lock = threading.Lock()
+_refreshing = {"active": False, "started_at": None}
+
+
+def _background_refresh(force: bool = True):
+    """后台线程里做真实抓取。Comtrade/WITS 有限流，全量需数分钟。"""
+    try:
+        from free_data_sources import refresh_all, warm_up  # type: ignore
+
+        summary = refresh_all() if force else warm_up()
+        log.info("data source refresh finished: %s", summary)
+    except Exception as e:
+        log.warning("data source refresh failed: %s", e)
+    finally:
+        with _refresh_lock:
+            _refreshing["active"] = False
+
+
+def _start_refresh(force: bool = True) -> bool:
+    with _refresh_lock:
+        if _refreshing["active"]:
+            return False
+        _refreshing["active"] = True
+        _refreshing["started_at"] = datetime.now().isoformat(timespec="seconds")
+    threading.Thread(target=_background_refresh, args=(force,), daemon=True).start()
+    return True
 
 
 @app.route("/api/data-sources", methods=["GET"])
 def api_data_sources():
-    """返回所有免费数据源聚合结果"""
+    """免费数据源聚合结果。
+
+    ?refresh=1 触发后台强制刷新（Comtrade 有速率限制，全量刷新需数分钟，
+    因此立即返回当前缓存，不阻塞请求）。
+    """
+    if request.args.get("refresh", "0") == "1":
+        started = _start_refresh(force=True)
+        res = DataAggregator().fetch_all()
+        res["refresh"] = {
+            "triggered": started,
+            "note": "后台刷新中，Comtrade 速率限制下约需 3-5 分钟，稍后重新查询",
+            "started_at": _refreshing["started_at"],
+        }
+        return jsonify(res)
+
+    return jsonify(DataAggregator().fetch_all())
+
+
+def _boot_warm_up():
+    """启动后在后台补齐冷缓存，不阻塞第一个请求。"""
+    if os.environ.get("WARM_UP_ON_BOOT", "true").lower() != "true":
+        return
+    from db import cache_status  # type: ignore
+
+    try:
+        known = {c["source"] for c in cache_status()}
+    except Exception:
+        known = set()
     agg = DataAggregator()
-    return jsonify(agg.fetch_all())
+    needed = {a.name for a in (agg.comtrade, agg.wits, agg.worldbank, agg.trends)}
+    if needed - known:
+        log.info("[boot] 数据源缓存缺失 %s，后台预热中", sorted(needed - known))
+        _start_refresh(force=False)
+
+
+_boot_warm_up()
+
+
+@app.route("/api/data-sources/status", methods=["GET"])
+def api_data_sources_status():
+    """轻量状态查询：只读缓存元信息，不触发任何外部请求。"""
+    from db import cache_status  # 局部导入避免循环
+
+    return jsonify({
+        "backend": backend_name(),
+        "refreshing": _refreshing["active"],
+        "caches": cache_status(),
+    })
+
+
+# ── 飞书 ─────────────────────────────────────────
+@app.route("/api/feishu/ping", methods=["GET"])
+def api_feishu_ping():
+    """飞书配置自检：token 能否获取、多维表格能否访问。"""
+    return jsonify(feishu_client.get_client().ping())
+
+
+@app.route("/api/feishu/chats", methods=["GET"])
+def api_feishu_chats():
+    """列出机器人所在的群，用来查 LARK_CHAT_ID。"""
+    try:
+        return jsonify({"status": "ok", "chats": feishu_client.get_client().list_chats()})
+    except Exception as e:
+        return jsonify({"status": "error", "msg": str(e),
+                        "hint": "需要在飞书后台为应用开通 im:chat:readonly 权限"}), 400
+
+
+@app.route("/api/feishu/setup", methods=["POST"])
+def api_feishu_setup():
+    """在多维表格中创建 V5 方案要求的 5 张表（幂等，已存在则跳过）。"""
+    try:
+        return jsonify(feishu_client.get_client().ensure_tables())
+    except Exception as e:
+        return jsonify({"status": "error", "msg": str(e)}), 400
+
+
+@app.route("/api/feishu/sync", methods=["POST"])
+def api_feishu_sync():
+    """把本地库的产品/客户/询盘/选品结果全量同步到飞书多维表格。"""
+    try:
+        return jsonify(FeishuSync().sync_all())
+    except Exception as e:
+        log.exception("feishu sync failed")
+        return jsonify({"status": "error", "msg": str(e)}), 400
 
 
 @app.route("/api/dashboard", methods=["GET"])
 def api_dashboard():
     """管理后台用的统计接口"""
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    try:
-        total_customers = cur.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-        total_inquiries = cur.execute("SELECT COUNT(*) FROM inquiries").fetchone()[0]
-        new_inquiries = cur.execute("SELECT COUNT(*) FROM inquiries WHERE status='new'").fetchone()[0]
-        total_chats = cur.execute("SELECT COUNT(*) FROM chat_logs").fetchone()[0]
-        recent_inq = cur.execute(
+    def one(cur, sql: str) -> int:
+        cur.execute(sql)
+        return int(cur.fetchone()[0])
+
+    with connect() as conn:
+        cur = conn.cursor()
+        stats = {
+            "total_customers": one(cur, "SELECT COUNT(*) FROM customers"),
+            "total_inquiries": one(cur, "SELECT COUNT(*) FROM inquiries"),
+            "new_inquiries": one(cur, "SELECT COUNT(*) FROM inquiries WHERE status='new'"),
+            "total_chats": one(cur, "SELECT COUNT(*) FROM chat_logs"),
+        }
+        cur.execute(
             """SELECT i.id, c.name, c.country, i.sku, i.quantity_rolls, i.status, i.created_at
-               FROM inquiries i LEFT JOIN customers c ON i.customer_id=c.id
+               FROM inquiries i LEFT JOIN customers c ON i.customer_id = c.id
                ORDER BY i.id DESC LIMIT 10"""
-        ).fetchall()
+        )
         recent_inq = [
             {
                 "id": r[0], "customer": r[1], "country": r[2], "sku": r[3],
-                "qty": r[4], "status": r[5], "created_at": r[6],
+                "qty": r[4], "status": r[5], "created_at": str(r[6])[:19],
             }
-            for r in recent_inq
+            for r in cur.fetchall()
         ]
-        countries = cur.execute(
-            """SELECT country, COUNT(*) FROM inquiries i
-               JOIN customers c ON i.customer_id=c.id
-               GROUP BY country ORDER BY 2 DESC"""
-        ).fetchall()
-        return jsonify({
-            "stats": {
-                "total_customers": total_customers,
-                "total_inquiries": total_inquiries,
-                "new_inquiries": new_inquiries,
-                "total_chats": total_chats,
-            },
-            "recent_inquiries": recent_inq,
-            "country_distribution": [{"country": c or "未知", "count": n} for c, n in countries],
-        })
-    finally:
-        conn.close()
+        cur.execute(
+            """SELECT c.country, COUNT(*) FROM inquiries i
+               JOIN customers c ON i.customer_id = c.id
+               GROUP BY c.country ORDER BY 2 DESC"""
+        )
+        countries = cur.fetchall()
+
+    return jsonify({
+        "stats": stats,
+        "recent_inquiries": recent_inq,
+        "country_distribution": [{"country": c or "未知", "count": n} for c, n in countries],
+    })
+
+
+# ============================================================
+# 管理后台 · 三大数据分析模块 API（V8）
+# ============================================================
+def _latest_scores() -> list[dict]:
+    """取最新一轮选品评分（缓存 → DB → 现算，逐级降级）。"""
+    from db import cache_get  # 局部导入避免循环
+
+    cached = cache_get(SOURCING_CACHE_KEY, SOURCING_TTL * 10)
+    if cached and cached.get("scores"):
+        return cached["scores"]
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                q("""SELECT sku, score_total, tier, ai_reason, target_market, fetched_at
+                     FROM sourcing_scores ss
+                     WHERE id = (SELECT MAX(id) FROM sourcing_scores s2 WHERE s2.sku = ss.sku)
+                     ORDER BY score_total DESC""")
+            )
+            rows = cur.fetchall()
+        if rows:
+            return [
+                {"sku": r[0], "total_score": r[1], "tier": r[2],
+                 "ai_reason": r[3], "target_market": r[4]}
+                for r in rows
+            ]
+    except Exception as e:
+        log.warning("latest scores query failed: %s", e)
+    return score_all()
+
+
+@app.route("/api/admin/sourcing-analysis", methods=["GET"])
+def api_admin_sourcing_analysis():
+    """模块一：选品数据分析 + 选品建议 + 当前发布状态。"""
+    scores = _latest_scores()
+
+    # 维度聚合（从 DB 取每 SKU 最新一轮的 6 维）
+    dimension_avg = {"market": 0, "growth": 0, "fit": 0, "margin": 0, "barrier": 0, "sea": 0}
+    dim_count = 0
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                q("""SELECT AVG(score_market), AVG(score_growth), AVG(score_fit),
+                            AVG(score_margin), AVG(score_barrier), AVG(score_sea), COUNT(DISTINCT sku)
+                     FROM sourcing_scores ss
+                     WHERE id = (SELECT MAX(id) FROM sourcing_scores s2 WHERE s2.sku = ss.sku)""")
+            )
+            r = cur.fetchone()
+            if r and r[6]:
+                dimension_avg = {
+                    "market": round(r[0] or 0, 2), "growth": round(r[1] or 0, 2),
+                    "fit": round(r[2] or 0, 2), "margin": round(r[3] or 0, 2),
+                    "barrier": round(r[4] or 0, 2), "sea": round(r[5] or 0, 2),
+                }
+                dim_count = r[6]
+
+            # 评分趋势（按天平均总分）
+            cur.execute(
+                q("""SELECT SUBSTR(fetched_at, 1, 10) AS d, AVG(score_total)
+                     FROM sourcing_scores GROUP BY d ORDER BY d DESC LIMIT 14""")
+            )
+            trend = [{"date": r[0], "avg_score": round(r[1], 2)} for r in cur.fetchall()][::-1]
+
+            # 当前推荐位 + 发布日志
+            cur.execute(q("SELECT sku FROM products WHERE featured = 1 ORDER BY featured_rank"))
+            featured = [r[0] for r in cur.fetchall()]
+            cur.execute(q("SELECT skus, trigger, detail, created_at FROM publish_log ORDER BY id DESC LIMIT 5"))
+            pub_log = [
+                {"skus": json.loads(r[0] or "[]"), "trigger": r[1],
+                 "detail": json.loads(r[2] or "{}"), "created_at": str(r[3])[:16]}
+                for r in cur.fetchall()
+            ]
+    except Exception as e:
+        log.warning("sourcing analysis agg failed: %s", e)
+        trend, featured, pub_log = [], [], []
+
+    # 规则化选品建议（数据飞轮输出）
+    t1 = [s for s in scores if s["tier"] == "T1"]
+    t2 = [s for s in scores if s["tier"] == "T2"]
+    suggestions = []
+    if t1:
+        suggestions.append(f"T1 主推 SKU {len(t1)} 款：{', '.join(s['sku'] for s in t1[:3])} — 建议立即置顶到独立站首页")
+    if t2:
+        suggestions.append(f"T2 备选 {len(t2)} 款 — 建议配套 1-2 个重点市场做样品推广")
+    weak_margin = dimension_avg["margin"] < 6.0
+    if weak_margin:
+        suggestions.append("毛利率维度整体偏弱 — 建议对低毛利 SKU 谈原料集采或小幅提价 2-3%")
+    if not featured:
+        suggestions.append("首页推荐位为空 — 点击「一键发布 Top SKU」把高评分产品推到独立站首页")
+
+    tier_dist = {"T1": len(t1), "T2": len(t2),
+                 "T3": len(scores) - len(t1) - len(t2) - sum(1 for s in scores if s["tier"] == "T4"),
+                 "T4": sum(1 for s in scores if s["tier"] == "T4")}
+
+    return jsonify({
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "scores": scores,
+        "tier_distribution": tier_dist,
+        "dimension_avg": dimension_avg,
+        "dimension_sample_count": dim_count,
+        "score_trend": trend,
+        "featured_skus": featured,
+        "publish_log": pub_log,
+        "suggestions": suggestions,
+    })
+
+
+@app.route("/api/admin/publish-products", methods=["POST"])
+def api_admin_publish_products():
+    """模块一：一键选品更新到网页（Top SKU 置顶独立站首页）。"""
+    payload = request.get_json() or {}
+    count = min(int(payload.get("count", 6)), 12)
+    skus = payload.get("skus")
+
+    if not skus:
+        scores = _latest_scores()
+        skus = [s["sku"] for s in scores[:count]]
+    if not skus:
+        return jsonify({"status": "error", "msg": "no skus to publish"}), 400
+
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(q("UPDATE products SET featured = 0, featured_rank = NULL"))
+            for rank, sku in enumerate(skus, start=1):
+                cur.execute(
+                    q("UPDATE products SET featured = 1, featured_rank = ? WHERE sku = ?"),
+                    (rank, sku),
+                )
+            cur.execute(
+                q("""INSERT INTO publish_log (skus, trigger, detail)
+                     VALUES (?,?,?)"""),
+                (json.dumps(skus, ensure_ascii=False), payload.get("trigger", "manual"),
+                 json.dumps({"count": len(skus)}, ensure_ascii=False)),
+            )
+    except Exception as e:
+        log.exception("publish failed")
+        return jsonify({"status": "error", "msg": str(e)}), 500
+
+    return jsonify({
+        "status": "ok",
+        "published": skus,
+        "msg": f"已把 {len(skus)} 款 SKU 推送到独立站首页推荐位（置顶显示）",
+    })
+
+
+@app.route("/api/admin/seo/overview", methods=["GET"])
+def api_admin_seo_overview():
+    """模块二：SEO/GEO 推广数据驾驶舱。"""
+    return jsonify(seo_engine.overview())
+
+
+@app.route("/api/admin/seo/optimize", methods=["POST"])
+def api_admin_seo_optimize():
+    """模块二：执行一轮自动优化（高曝光低 CTR 页面重写 Title/Meta）。"""
+    try:
+        return jsonify(seo_engine.auto_optimize(max_pages=3))
+    except Exception as e:
+        log.exception("seo optimize failed")
+        return jsonify({"status": "error", "msg": str(e)}), 500
+
+
+@app.route("/api/admin/seo/simulate-day", methods=["POST"])
+def api_admin_seo_simulate():
+    """模块二：模拟推进一天数据（真实 Search Console API 就绪前的驱动器）。"""
+    try:
+        return jsonify(seo_engine.simulate_day())
+    except Exception as e:
+        log.exception("seo simulate failed")
+        return jsonify({"status": "error", "msg": str(e)}), 500
+
+
+@app.route("/api/admin/chat/analytics", methods=["GET"])
+def api_admin_chat_analytics():
+    """模块三：智能客服全量数据分析。"""
+    return jsonify(chat_analytics.analytics())
+
+
+@app.route("/api/admin/chat/session/<session_id>", methods=["GET"])
+def api_admin_chat_session(session_id: str):
+    """模块三：单个会话完整对话记录。"""
+    detail = chat_analytics.session_detail(session_id)
+    if not detail["messages"]:
+        return jsonify({"status": "error", "msg": "session not found"}), 404
+    return jsonify(detail)
 
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "ts": datetime.now().isoformat()})
+    """健康检查：同时探测数据库真实可用性。"""
+    db_ok, db_err = True, None
+    try:
+        with connect() as conn:
+            conn.cursor().execute("SELECT 1")
+    except Exception as e:
+        db_ok, db_err = False, str(e)[:200]
+
+    from llm_client import is_available  # type: ignore
+
+    body = {
+        "status": "ok" if db_ok else "degraded",
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "db": {"backend": backend_name(), "ok": db_ok, "error": db_err},
+        "llm": {"provider": "deepseek", "configured": is_available()},
+        "feishu": {"configured": feishu_client.is_configured(),
+                   "dry_run": feishu_client.is_dry_run()},
+    }
+    return jsonify(body), (200 if db_ok else 503)
 
 
 # ============================================================
@@ -332,5 +685,7 @@ if __name__ == "__main__":
     print(f"   🤖 AI 客服 API:  POST http://127.0.0.1:{port}/api/chat")
     print(f"   📋 询盘 API:     POST http://127.0.0.1:{port}/api/inquiry")
     print(f"   🌟 选品 API:     GET  http://127.0.0.1:{port}/api/sourcing")
-    print(f"   📦 数据库:       {DB_FILE}\n")
+    print(f"   🌐 数据源:       GET  http://127.0.0.1:{port}/api/data-sources")
+    print(f"   🔗 飞书自检:     GET  http://127.0.0.1:{port}/api/feishu/ping")
+    print(f"   📦 数据库:       {backend_name()}\n")
     app.run(host="0.0.0.0", port=port, debug=False)

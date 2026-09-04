@@ -1,210 +1,304 @@
 """
-赣丰玻纤 · 飞书同步层（lark-base 适配）
-=========================================
-把 SQLite 的 5 张表数据按 V4 方案"飞书多维表格"字段定义同步过去。
+赣丰玻纤 · 飞书同步与自动化
+============================
 
-本模块在演示模式下默认"打印动作不真发"，真实生产环境通过 subprocess 调用 lark-cli。
+对应 V5 方案第 ⑤⑥ 章：
+
+  ⑤ 知识库：把 FAQ 灌入多维表格 knowledge_base 表
+  ⑥ 自动化：
+      new_inquiry     → 群卡片通知 + 写入 inquiries 表 + 回写 record_id
+      sourcing_ready  → 选品 Top5 推送群 + 写入 sourcing_scores 表
+      full_sync       → 产品/客户/询盘/选品/知识库 全量同步
+
+未配置飞书（缺 LARK_APP_ID/SECRET）或 LARK_DRY_RUN=true 时，
+所有操作只打印不发请求，业务链路照常跑通。
 """
 from __future__ import annotations
+
 import json
+import logging
 import os
-import sqlite3
-import subprocess
 import sys
 from datetime import datetime
 from typing import Any
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(THIS_DIR)
-DB_FILE = os.path.join(ROOT_DIR, "data", "trade.db")
+sys.path.insert(0, THIS_DIR)
 
+from db import connect, q, IS_PG  # type: ignore
+import feishu_client  # type: ignore
+from feishu_client import FeishuClient, FeishuError  # type: ignore
 
-# 飞书多维表格字段定义（与 V4 方案严格对应）
-FEISHU_BASE_SCHEMA = {
-    "products": {
-        "fields": [
-            {"name": "SKU", "type": "SingleLineText"},
-            {"name": "产品名称", "type": "SingleLineText"},
-            {"name": "克重 (g/m²)", "type": "Number"},
-            {"name": "网孔", "type": "SingleLineText"},
-            {"name": "目标市场", "type": "MultiSelect"},
-            {"name": "FOB 价格 (USD/m²)", "type": "Number"},
-            {"name": "MOQ (卷)", "type": "Number"},
-            {"name": "交期 (天)", "type": "Number"},
-            {"name": "毛利率 (%)", "type": "Number"},
-            {"name": "上线状态", "type": "Select"},
-        ]
-    },
-    "customers": {
-        "fields": [
-            {"name": "客户姓名", "type": "SingleLineText"},
-            {"name": "公司", "type": "SingleLineText"},
-            {"name": "国家", "type": "SingleLineText"},
-            {"name": "邮箱", "type": "Email"},
-            {"name": "WhatsApp", "type": "Phone"},
-            {"name": "客户分层", "type": "Select"},
-            {"name": "首询日期", "type": "DateTime"},
-            {"name": "负责人", "type": "User"},
-            {"name": "来源", "type": "Select"},
-            {"name": "状态", "type": "Select"},
-        ]
-    },
-    "inquiries": {
-        "fields": [
-            {"name": "询盘编号", "type": "AutoNumber"},
-            {"name": "客户", "type": "Link", "link_to": "customers"},
-            {"name": "目标 SKU", "type": "Link", "link_to": "products"},
-            {"name": "需求卷数", "type": "Number"},
-            {"name": "需求面积 (m²)", "type": "Number"},
-            {"name": "客户留言", "type": "MultiLineText"},
-            {"name": "来源", "type": "Select"},
-            {"name": "状态", "type": "Select"},
-            {"name": "AI 识别意图", "type": "SingleLineText"},
-            {"name": "客户分层", "type": "Select"},
-            {"name": "创建时间", "type": "DateTime"},
-            {"name": "跟进人", "type": "User"},
-        ]
-    },
-    "sourcing_scores": {
-        "fields": [
-            {"name": "日期", "type": "Date"},
-            {"name": "SKU", "type": "Link", "link_to": "products"},
-            {"name": "总分", "type": "Number"},
-            {"name": "市场规模", "type": "Number"},
-            {"name": "增速", "type": "Number"},
-            {"name": "产线匹配", "type": "Number"},
-            {"name": "毛利率", "type": "Number"},
-            {"name": "壁垒", "type": "Number"},
-            {"name": "出海易度", "type": "Number"},
-            {"name": "Tier", "type": "Select"},
-            {"name": "推荐理由", "type": "MultiLineText"},
-            {"name": "数据源版本", "type": "SingleLineText"},
-        ]
-    },
-    "knowledge_base": {
-        "fields": [
-            {"name": "类别", "type": "Select"},
-            {"name": "问题 (中)", "type": "SingleLineText"},
-            {"name": "问题 (英)", "type": "SingleLineText"},
-            {"name": "答案", "type": "MultiLineText"},
-            {"name": "意图标签", "type": "SingleLineText"},
-            {"name": "命中关键词", "type": "MultiLineText"},
-            {"name": "状态", "type": "Select"},
-        ]
-    },
-}
+logger = logging.getLogger("feishu_sync")
+
+FAQ_FILE = os.path.join(ROOT_DIR, "data", "faqs.json")
+SKU_FILE = os.path.join(ROOT_DIR, "data", "sku.json")
 
 
 class FeishuSync:
-    """
-    演示模式 (LARK_DRY_RUN=true) ：仅打印，不会真正调用 lark-cli
-    真实模式 (LARK_DRY_RUN=false)：调用 lark-base 命令写入字段与记录
-    """
+    """飞书同步器。构造时不发任何请求，按需取 token。"""
 
-    def __init__(self, db_path: str = DB_FILE, dry_run: bool | None = None):
-        if dry_run is None:
-            dry_run = os.environ.get("LARK_DRY_RUN", "true").lower() != "false"
-        self.db_path = db_path
-        self.dry_run = dry_run
+    def __init__(self, db_path: str | None = None, dry_run: bool | None = None,
+                 client: FeishuClient | None = None):
+        # db_path 保留仅为向后兼容旧调用，实际后端由 DATABASE_URL 决定
+        self.client = client or feishu_client.get_client()
+        if dry_run is not None:
+            self.client.dry_run = dry_run
 
-    def _exec(self, cmd_args: list[str]) -> dict[str, Any]:
-        if self.dry_run:
-            return {"status": "dry-run", "cmd": "lark-cli " + " ".join(cmd_args[:5]) + " ..."}
+    @property
+    def enabled(self) -> bool:
+        return feishu_client.is_configured()
+
+    # ========================================================
+    # 自动化触发
+    # ========================================================
+    def trigger_automation(self, event: str, payload: dict[str, Any]) -> dict[str, Any]:
+        handlers = {
+            "new_inquiry": self._on_new_inquiry,
+            "sourcing_ready": self._on_sourcing_ready,
+        }
+        handler = handlers.get(event)
+        if not handler:
+            return {"action": event, "status": "no-handler"}
+
+        if not self.enabled:
+            logger.info("[飞书未配置] %s: %s", event, json.dumps(payload, ensure_ascii=False)[:200])
+            return {"action": f"{event}-skipped", "status": "not-configured"}
         try:
-            res = subprocess.run(
-                ["lark-cli"] + cmd_args,
-                capture_output=True, text=True, check=True, timeout=60,
+            return handler(payload)
+        except FeishuError as e:
+            logger.warning("%s 处理失败: %s", event, e)
+            return {"action": event, "status": f"error: {e}"}
+
+    def _on_new_inquiry(self, p: dict[str, Any]) -> dict[str, Any]:
+        """新询盘：写多维表格 + 群卡片通知 + 回写 record_id。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        record_id = None
+        table_status = "skipped"
+
+        if self.client.base_token:
+            res = self.client.create_record("inquiries", {
+                "询盘编号": f"INQ-{p.get('inquiry_id')}",
+                "客户": p.get("customer"),
+                "国家": p.get("country"),
+                "目标SKU": p.get("sku"),
+                "需求卷数": _num(p.get("qty")),
+                "需求面积": _num(p.get("quantity_sqm")),
+                "客户留言": p.get("message"),
+                "来源": p.get("source"),
+                "状态": "新询盘",
+                "AI识别意图": p.get("intent"),
+                "创建时间": now,
+            })
+            record_id = res.get("record_id")
+            table_status = res.get("status", "ok")
+            if record_id and p.get("inquiry_id"):
+                self._save_record_id("inquiries", int(p["inquiry_id"]), record_id)
+
+        qty = p.get("qty")
+        lines = [
+            f"**客户**：{p.get('customer') or '-'}（{p.get('company') or '未填公司'}）",
+            f"**国家**：{p.get('country') or '-'}",
+            f"**产品**：{p.get('sku') or '未指定'}",
+            f"**数量**：{qty if qty else '未填'} 卷",
+            f"**邮箱**：{p.get('email') or '-'}",
+            f"**留言**：{(p.get('message') or '无')[:120]}",
+            f"**来源**：{p.get('source') or 'website'}　**时间**：{now}",
+            "",
+            "请在 **24 小时内** 完成首次回复。",
+        ]
+        msg = self.client.send_card(
+            f"🔔 新询盘 INQ-{p.get('inquiry_id')}",
+            lines,
+            color="orange",
+        )
+        return {
+            "action": "feishu-inquiry-sync",
+            "status": f"table={table_status}, notify={msg.get('status')}",
+            "record_id": record_id,
+        }
+
+    def _on_sourcing_ready(self, p: dict[str, Any]) -> dict[str, Any]:
+        """选品结果就绪：Top5 推群。"""
+        scores = p.get("scores", [])[:5]
+        if not scores:
+            return {"action": "feishu-sourcing", "status": "empty"}
+        lines = [f"**数据源状态**：{p.get('data_status', 'n/a')}", ""]
+        for i, s in enumerate(scores, 1):
+            lines.append(
+                f"**{i}. {s.get('sku')}** {s.get('name_zh', '')}　"
+                f"总分 **{s.get('total_score')}**（{s.get('tier')}）"
             )
-            return {"status": "ok", "stdout": res.stdout[:500]}
-        except subprocess.CalledProcessError as e:
-            return {"status": "error", "stderr": e.stderr[:500]}
-        except FileNotFoundError:
-            return {"status": "lark-cli-not-installed"}
+            if s.get("ai_reason"):
+                lines.append(f"　　{s['ai_reason']}")
+            if s.get("target_market"):
+                lines.append(f"　　🎯 {s['target_market']}")
+        msg = self.client.send_card("📊 本期选品 Top 5", lines, color="blue")
+        return {"action": "feishu-sourcing-notify", "status": msg.get("status")}
 
-    def ensure_schema(self, base_token: str) -> dict[str, Any]:
-        """确保飞书多维表格 5 张主表的字段已存在"""
-        results = {}
-        for tbl_name, schema in FEISHU_BASE_SCHEMA.items():
-            fields_json = json.dumps(schema["fields"], ensure_ascii=False)
-            results[tbl_name] = self._exec([
-                "base", "field", "create",
-                "--base-token", base_token,
-                "--table-name", tbl_name,
-                "--fields", fields_json,
-            ])
-        return results
+    def _save_record_id(self, table: str, row_id: int, record_id: str) -> None:
+        try:
+            with connect() as conn:
+                conn.cursor().execute(
+                    q(f"UPDATE {table} SET feishu_record_id = ? WHERE id = ?"),
+                    (record_id, row_id),
+                )
+        except Exception as e:
+            logger.warning("回写 feishu_record_id 失败: %s", e)
 
-    def push_one_inquiry(self, base_token: str, table_name: str, rec: dict) -> dict[str, Any]:
-        cell_values = json.dumps(rec, ensure_ascii=False)
-        return self._exec([
-            "base", "record", "create",
-            "--base-token", base_token,
-            "--table-name", table_name,
-            "--cell-values", cell_values,
-        ])
+    # ========================================================
+    # 全量同步
+    # ========================================================
+    def sync_all(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"status": "not-configured",
+                    "hint": "请先设置 LARK_APP_ID / LARK_APP_SECRET / LARK_BASE_TOKEN"}
+        if not self.client.base_token:
+            return {"status": "error", "hint": "LARK_BASE_TOKEN 未配置，无法写多维表格"}
 
-    def push_recent(self, base_token: str, target_table: str, since_minutes: int = 60) -> dict[str, Any]:
-        """把 SQLite 最近 N 分钟的新记录同步到飞书"""
-        if not os.path.exists(self.db_path):
-            return {"status": "no-local-db"}
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        results = {"table": target_table, "pushed": 0, "errors": 0, "details": []}
+        setup = self.client.ensure_tables()
+        result: dict[str, Any] = {"status": "ok", "tables": setup, "synced": {}}
+        for name, fn in (
+            ("products", self._sync_products),
+            ("customers", self._sync_customers),
+            ("inquiries", self._sync_inquiries),
+            ("sourcing_scores", self._sync_sourcing),
+            ("knowledge_base", self._sync_knowledge),
+        ):
+            try:
+                result["synced"][name] = fn()
+            except Exception as e:
+                logger.warning("同步 %s 失败: %s", name, e)
+                result["synced"][name] = {"status": "error", "msg": str(e)[:200]}
+        return result
 
-        if target_table == "inquiries":
-            rows = cur.execute("""
-                SELECT i.id, c.name, i.sku, i.quantity_rolls, i.quantity_sqm, i.message,
-                       i.source, i.status, i.created_at
-                FROM inquiries i LEFT JOIN customers c ON i.customer_id = c.id
-                ORDER BY i.id DESC LIMIT 50
-            """).fetchall()
-            for row in rows:
-                rec = {
-                    "客户": row[1] or "匿名",
-                    "目标 SKU": row[2],
-                    "需求卷数": row[3] or 0,
-                    "需求面积 (m²)": row[4] or 0,
-                    "客户留言": row[5] or "",
-                    "来源": row[6] or "website",
-                    "状态": row[7] or "new",
-                    "创建时间": row[8],
-                }
-                r = self.push_one_inquiry(base_token, target_table, rec)
-                results["pushed" if r.get("status") == "ok" or r.get("status") == "dry-run" else "errors"] += 1
-                results["details"].append(r)
-        elif target_table == "customers":
-            rows = cur.execute("""
-                SELECT id, name, company, country, email, phone, intent, created_at
-                FROM customers ORDER BY id DESC LIMIT 50
-            """).fetchall()
-            for row in rows:
-                rec = {
-                    "客户姓名": row[1], "公司": row[2], "国家": row[3],
-                    "邮箱": row[4], "WhatsApp": row[5], "客户分层": row[6] or "cold",
-                    "首询日期": row[7], "状态": "active",
-                }
-                r = self.push_one_inquiry(base_token, "customers", rec)
-                results["pushed" if r.get("status") in ("ok", "dry-run") else "errors"] += 1
+    def _sync_products(self) -> dict[str, Any]:
+        with open(SKU_FILE, "r", encoding="utf-8") as f:
+            products = json.load(f)["products"]
+        records = [{
+            "SKU": p["sku"],
+            "产品名称": p["name_zh"],
+            "英文名称": p.get("name_en"),
+            "克重": _num(p.get("gram")),
+            "网孔": p.get("mesh_size"),
+            "FOB价格USD每平米": _num(p.get("target_price_usd_per_sqm")),
+            "MOQ卷": _num(p.get("moq_rolls")),
+            "交期天": _num(p.get("lead_time_days")),
+            "应用场景": ", ".join(p.get("scenarios", [])),
+        } for p in products]
+        return self.client.batch_create_records("products", records)
 
-        conn.close()
-        return results
+    def _sync_customers(self) -> dict[str, Any]:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT name, company, country, email, phone, layer, intent, created_at
+                   FROM customers ORDER BY id"""
+            )
+            rows = cur.fetchall()
+        records = [{
+            "客户姓名": r[0], "公司": r[1], "国家": r[2], "邮箱": r[3],
+            "WhatsApp": r[4], "客户分层": r[5], "来源": r[6],
+            "首询日期": str(r[7])[:19],
+        } for r in rows]
+        return self.client.batch_create_records("customers", records)
 
-    def trigger_automation(self, trigger_type: str, payload: dict) -> dict[str, Any]:
-        """触发飞书自动化（如：新询盘通知外贸群）"""
-        # 真实示例（dry-run=false 时）：
-        # self._exec(["im", "messages", "send", "--chat-id", "<外贸群ID>", "--content", json.dumps(...)])
-        action = f"automation: {trigger_type} | payload: {json.dumps(payload)[:120]}"
-        if self.dry_run:
-            print(f"[feishu-dry-run] {action}")
-            return {"status": "dry-run", "action": action}
-        # 真实环境：调用自动化触发器
-        return self._exec(["im", "messages", "send", "--content", action])
+    def _sync_inquiries(self) -> dict[str, Any]:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT i.id, c.name, c.country, i.sku, i.quantity_rolls, i.quantity_sqm,
+                          i.message, i.source, i.status, i.ai_intent, i.created_at
+                   FROM inquiries i LEFT JOIN customers c ON i.customer_id = c.id
+                   ORDER BY i.id"""
+            )
+            rows = cur.fetchall()
+        records = [{
+            "询盘编号": f"INQ-{r[0]}", "客户": r[1], "国家": r[2], "目标SKU": r[3],
+            "需求卷数": _num(r[4]), "需求面积": _num(r[5]), "客户留言": r[6],
+            "来源": r[7], "状态": r[8], "AI识别意图": r[9],
+            "创建时间": str(r[10])[:19],
+        } for r in rows]
+        return self.client.batch_create_records("inquiries", records)
+
+    def _sync_sourcing(self) -> dict[str, Any]:
+        """只同步每个 SKU 的最新一次评分。"""
+        with connect() as conn:
+            cur = conn.cursor()
+            if IS_PG:
+                cur.execute(
+                    """SELECT DISTINCT ON (sku)
+                              sku, score_total, score_market, score_growth, score_fit,
+                              score_margin, score_barrier, score_sea, tier,
+                              ai_reason, target_market, fetched_at
+                       FROM sourcing_scores ORDER BY sku, fetched_at DESC, id DESC"""
+                )
+            else:
+                cur.execute(
+                    """SELECT sku, score_total, score_market, score_growth, score_fit,
+                              score_margin, score_barrier, score_sea, tier,
+                              ai_reason, target_market, fetched_at
+                       FROM sourcing_scores
+                       WHERE id IN (SELECT MAX(id) FROM sourcing_scores GROUP BY sku)"""
+                )
+            rows = cur.fetchall()
+
+        name_map = _sku_name_map()
+        records = [{
+            "日期": str(r[11])[:19], "SKU": r[0], "产品名称": name_map.get(r[0], ""),
+            "总分": _num(r[1]), "市场规模": _num(r[2]), "增速": _num(r[3]),
+            "产线匹配": _num(r[4]), "毛利率": _num(r[5]), "壁垒": _num(r[6]),
+            "出海易度": _num(r[7]), "Tier": r[8],
+            "AI推荐理由": r[9], "目标市场": r[10],
+        } for r in rows]
+        return self.client.batch_create_records("sourcing_scores", records)
+
+    def _sync_knowledge(self) -> dict[str, Any]:
+        with open(FAQ_FILE, "r", encoding="utf-8") as f:
+            faqs = json.load(f)
+        items = faqs.get("faqs", faqs) if isinstance(faqs, dict) else faqs
+        records = [{
+            "类别": it.get("category"),
+            "问题中文": it.get("q_zh") or it.get("question_zh"),
+            "问题英文": it.get("q_en") or it.get("question_en"),
+            "答案": it.get("a_zh") or it.get("answer_zh") or it.get("a_en") or it.get("answer_en"),
+            "意图标签": it.get("intent"),
+        } for it in items]
+        return self.client.batch_create_records("knowledge_base", records)
+
+
+def _num(v: Any) -> float | None:
+    """多维表格数字字段只接受数值，非数值一律返回 None（会被过滤掉）。"""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sku_name_map() -> dict[str, str]:
+    try:
+        with open(SKU_FILE, "r", encoding="utf-8") as f:
+            return {p["sku"]: p["name_zh"] for p in json.load(f)["products"]}
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":
-    fsync = FeishuSync(dry_run=True)
-    print("=== ensure_schema (demo) ===")
-    for k, v in fsync.ensure_schema("BASE_TOKEN_DEMO").items():
-        print(f"  {k}: {v['status']}")
-    print("\n=== trigger_automation ===")
-    fsync.trigger_automation("new_inquiry", {"customer": "Ali Mahmoud", "sku": "GF-AR-145-44"})
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    s = FeishuSync()
+    print("=== 飞书连通性 ===")
+    print(json.dumps(s.client.ping(), ensure_ascii=False, indent=2))
+    if "--sync" in sys.argv:
+        print("\n=== 全量同步 ===")
+        print(json.dumps(s.sync_all(), ensure_ascii=False, indent=2))
+    if "--test-inquiry" in sys.argv:
+        print("\n=== 模拟新询盘 ===")
+        print(json.dumps(s.trigger_automation("new_inquiry", {
+            "inquiry_id": 999, "customer": "测试客户", "company": "Test Co",
+            "country": "Saudi Arabia", "email": "test@example.com",
+            "sku": "GF-AR-145-44", "qty": 800, "message": "测试询盘",
+            "source": "manual-test", "intent": "rfq",
+        }), ensure_ascii=False, indent=2))

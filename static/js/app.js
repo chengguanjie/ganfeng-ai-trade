@@ -329,6 +329,7 @@ async function loadProducts(){
     const daysLabel = currentLang === 'zh' ? '天' : 'days';
     return `
       <div class="product-card">
+        ${p.featured ? '<span class="pc-featured">🔥 ' + (currentLang === 'zh' ? 'AI 推荐' : 'AI Recommended') + '</span>' : ''}
         <span class="pc-sku">${p.sku}</span>
         <div class="pc-name">${p.name}</div>
         <div class="pc-spec">

@@ -2,3 +2,9 @@
 flask>=3.0
 gunicorn>=22.0
 requests>=2.31.0
+
+# PostgreSQL 驱动（设置 DATABASE_URL 时使用；未设置则自动降级到 SQLite）
+psycopg[binary]>=3.2
+
+# Google Trends（选品「增速」维度的辅助信号；不可用时自动降级）
+pytrends>=4.9.2

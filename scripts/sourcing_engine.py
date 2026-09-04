@@ -65,20 +65,37 @@ def _calc_market(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
         "GRC 永久性建筑": 0.7,
         "防火风管": 0.5,
     }
-    w = max(weight_by_scenario.get(s, 0.6) for s in sku.get("scenarios", []))
-    base_score = 8.0
+    scenarios = sku.get("scenarios", [])
+    w = max((weight_by_scenario.get(s, 0.6) for s in scenarios), default=0.6)
+
+    # 基准分由 Comtrade 实测的 HS7019 全球进口规模决定，而非写死
+    size_b = comtrade["global_import_usd_billion"]
+    if size_b >= 8:
+        base_score = 8.5
+    elif size_b >= 6:
+        base_score = 8.0
+    elif size_b >= 4:
+        base_score = 7.5
+    else:
+        base_score = 7.0
+
     score = base_score * w
+    top3 = comtrade.get("top_importers_2024", [])[:3]
     return min(10.0, max(1.0, score)), {
-        "global_import_usd_b": comtrade["global_import_usd_billion"],
+        "global_import_usd_b": size_b,
         "yoy_growth_pct": comtrade["yoy_growth_pct"],
-        "weight": w,
+        "data_year": agg._cached(agg.comtrade).get("data_year"),
+        "data_status": agg._cached(agg.comtrade).get("status"),
+        "top_importers": [f"{t['country']} ${t['import_usd_million']:.0f}M" for t in top3],
+        "scenario_weight": w,
+        "base_score": base_score,
     }
 
 
 def _calc_growth(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
     """增速（20%） - 0-10 分。优先看 Google Trends 关键词同比增速。"""
     sku_trend = agg.score_one_sku(sku)
-    yoy = sku_trend["yoy_change_pct"]
+    yoy = sku_trend["yoy_change_pct"] or 0.0
     if yoy >= 15:
         score = 9.5
     elif yoy >= 10:
@@ -93,7 +110,10 @@ def _calc_growth(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
         score = 4.0
     return score, {
         "trend_yoy_change_pct": yoy,
-        "trend_score_0_100": sku_trend["trend_score"] * 10,
+        "trend_score_0_100": round(sku_trend["trend_score"] * 10, 1),
+        "matched_keyword": sku_trend.get("matched_keyword"),
+        "growth_basis": sku_trend.get("growth_basis"),
+        "trend_confidence": sku_trend.get("trend_confidence"),
     }
 
 
@@ -142,18 +162,47 @@ def _calc_barrier(sku: dict) -> tuple[float, dict]:
     return score, {"special_features": matched, "factory_certs": ["ISO 9001", "CE"]}
 
 
-def _calc_sea(sku: dict) -> tuple[float, dict]:
-    """出海易度（10%） - 关税低 + 标准通用 + 经验丰富市场。
-       决策表：地区出口经验 + 标准通用性。"""
+def _calc_sea(sku: dict, agg: DataAggregator) -> tuple[float, dict]:
+    """出海易度（10%） - 真实关税 + 需求动能 + 公司既有出口经验。
+
+    三者加权：出口经验 50% / 关税友好度 30% / 建筑需求动能 20%。
+    关税与动能来自 WITS 与 World Bank 实时数据。
+    """
+    # 公司在各市场的既有出口经验（人工维护的业务知识）
     market_experience = {
         "Saudi Arabia": 1.0, "UAE": 1.0, "Vietnam": 1.0,
         "India": 0.9, "Brazil": 0.8, "Turkey": 0.85,
-        "Germany": 0.7, "USA": 0.7, "UK": 0.7,
-        "Iraq": 0.8, "Mexico": 0.7,
+        "Germany": 0.7, "France": 0.7, "USA": 0.7, "Mexico": 0.7,
     }
-    avg = sum(market_experience.values()) / len(market_experience)
-    score = 5.5 + avg * 4.0
-    return round(score, 1), {"company_export_avg_experience_pct": round(avg * 100, 0)}
+    exp_avg = sum(market_experience.values()) / len(market_experience)
+
+    tariffs = agg.tariff_map()
+    momentum = agg.momentum_map()
+
+    # 关税友好度：按出口经验加权的平均关税，15% 以上视为很不友好
+    weighted, wsum = 0.0, 0.0
+    for country, w in market_experience.items():
+        t = tariffs.get(country)
+        if t is not None:
+            weighted += t * w
+            wsum += w
+    avg_tariff = (weighted / wsum) if wsum else 8.0
+    tariff_friendly = max(0.0, min(1.0, 1.0 - avg_tariff / 15.0))
+
+    # 需求动能：取经验市场的平均动能指数（0-100 → 0-1）
+    mom_vals = [momentum[c] for c in market_experience if momentum.get(c) is not None]
+    mom_avg = (sum(mom_vals) / len(mom_vals) / 100.0) if mom_vals else 0.4
+
+    composite = exp_avg * 0.5 + tariff_friendly * 0.3 + mom_avg * 0.2
+    score = 4.0 + composite * 6.0
+    return round(min(10.0, max(1.0, score)), 1), {
+        "company_export_avg_experience_pct": round(exp_avg * 100, 0),
+        "avg_mfn_tariff_pct": round(avg_tariff, 2),
+        "tariff_friendly_0_1": round(tariff_friendly, 2),
+        "construction_momentum_avg": round(mom_avg * 100, 1),
+        "tariff_data_status": agg._cached(agg.wits).get("status"),
+        "macro_data_status": agg._cached(agg.worldbank).get("status"),
+    }
 
 
 # -----------------------------------------------------------
@@ -165,7 +214,7 @@ def score_one(sku: dict, agg: DataAggregator) -> dict[str, Any]:
     f, f_d = _calc_fit(sku)
     mg, mg_d = _calc_margin(sku)
     b, b_d = _calc_barrier(sku)
-    s, s_d = _calc_sea(sku)
+    s, s_d = _calc_sea(sku, agg)
 
     total = (
         WEIGHTS["market"] * m

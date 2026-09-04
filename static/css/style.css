@@ -289,3 +289,6 @@ button{cursor:pointer;font-family:inherit;border:none;background:none}
 /* ===== Floating ref to admin ===== */
 .admin-link{position:fixed;top:12px;right:12px;background:rgba(0,0,0,.7);color:#fff;padding:6px 12px;border-radius:14px;font-size:11px;z-index:50;text-decoration:none}
 .admin-link:hover{background:var(--brand);color:#fff;text-decoration:none}
+
+/* V8: 一键选品发布的推荐标识 */
+.pc-featured{position:absolute;top:12px;right:12px;background:linear-gradient(135deg,#ff6b1a,#ff9a3d);color:#fff;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;box-shadow:0 2px 8px rgba(255,107,26,.35)}

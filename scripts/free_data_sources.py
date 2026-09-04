@@ -1,291 +1,870 @@
 """
-赣丰玻纤 · 免费数据源接入层
-========================
+赣丰玻纤 · 免费数据源接入层（真实 API）
+========================================
 
-支持的免费/低成本数据源：
-1. UN Comtrade (联合国海关数据)
-2. Google Trends (搜索热度)
-3. World Bank WITS (关税/贸易流量)
-4. EU Eurostat / US ITC DataWeb 等各国海关
-5. Google Search (关键词搜索)
-6. 阿里国际站 / 中国制造网 (B2B 平台)
+四个真实数据源，全部免费、无需付费订阅：
 
-每个数据源都是一个适配器，统一返回结构：
-{
-    "source": 数据源名称,
-    "sku_keywords": [...],
-    "metrics": {
-        "market_size_usd": 市场规模（USD）,
-        "growth_pct_cagr": 年复合增长率（%),
-        "demand_index": 需求指数 0-100,
-        "trend_score": 趋势分 0-100,
-        "top_buying_countries": 进口大国列表,
-    },
-    "fetched_at": ISO 时间戳
-}
+┌────────────────┬──────────────────────────────────────────────┬────────┐
+│ 数据源         │ 用途                                          │ 缓存   │
+├────────────────┼──────────────────────────────────────────────┼────────┤
+│ UN Comtrade    │ HS 7019 各国进口额 + 同比增速（市场规模维度） │ 24h    │
+│ World Bank WITS│ HS 701959 各国 MFN 关税（出海易度维度）       │ 7d     │
+│ World Bank IND │ GDP / GDP增速 / 城镇化增速（需求动能）        │ 7d     │
+│ Google Trends  │ 8 个核心关键词热度 + 同比（增速维度）         │ 12h    │
+└────────────────┴──────────────────────────────────────────────┴────────┘
 
-真实生产环境中，把各适配器内部的 demo 数据替换为真实 API 调用即可。
+三级降级策略，保证永不阻断业务：
+    真实 API  →  过期缓存(stale)  →  内置基线数据(fallback)
+
+每个返回值都带 `status` 字段标明数据来源真实性：
+    live / cached / stale / fallback
 """
 from __future__ import annotations
+
 import json
+import logging
 import os
+import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, THIS_DIR)
+
+from db import cache_get, cache_put  # type: ignore
+
+logger = logging.getLogger("data_sources")
+
+DATA_DIR = os.path.join(os.path.dirname(THIS_DIR), "data")
 SKU_FILE = os.path.join(DATA_DIR, "sku.json")
+
+HTTP_TIMEOUT = int(os.environ.get("DATA_HTTP_TIMEOUT", "30"))
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _load_sku_keywords() -> list[str]:
-    with open(SKU_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    keywords = set()
-    for p in data["products"]:
-        name_en = p.get("name_en", "").lower()
-        for token in name_en.replace(",", " ").replace("(", " ").replace(")", " ").split():
-            if len(token) > 3 and token not in {"for", "with", "the", "and"}:
-                keywords.add(token)
-    return sorted(keywords)[:15]
+def _http_json(url: str, timeout: int = HTTP_TIMEOUT) -> Any:
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "GanfengTradeBot/1.0 (+https://ganfeng-trade.example)",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 # ============================================================
-# 1. UN Comtrade (联合国海关数据) - 免费开放接口
+# 目标市场主数据（三套编码体系的映射）
 # ============================================================
-class ComtradeAdapter:
-    """UN Comtrade 真实 API:
-       https://comtradeapi.un.org/data/v1/get/C/A/HS?reporter=ALL&period=2024&cmdCode=7019&flow=imp
+class Market:
+    __slots__ = ("name_en", "name_zh", "comtrade", "wits", "wb")
+
+    def __init__(self, name_en: str, name_zh: str, comtrade: int, wits: int, wb: str):
+        self.name_en = name_en
+        self.name_zh = name_zh
+        self.comtrade = comtrade   # Comtrade reporterCode
+        self.wits = wits           # ISO 3166 numeric（WITS 用）
+        self.wb = wb               # ISO 3166 alpha-3（World Bank 用）
+
+
+MARKETS: list[Market] = [
+    Market("USA",          "美国",     842, 840, "USA"),
+    Market("Germany",      "德国",     276, 276, "DEU"),
+    Market("France",       "法国",     251, 250, "FRA"),
+    Market("Saudi Arabia", "沙特",     682, 682, "SAU"),
+    Market("UAE",          "阿联酋",   784, 784, "ARE"),
+    Market("Vietnam",      "越南",     704, 704, "VNM"),
+    Market("India",        "印度",     699, 356, "IND"),
+    Market("Brazil",       "巴西",     76,  76,  "BRA"),
+    Market("Turkey",       "土耳其",   792, 792, "TUR"),
+    Market("Mexico",       "墨西哥",   484, 484, "MEX"),
+]
+
+HS_CHAPTER = "7019"      # 玻璃纤维及其制品（Comtrade 4 位可查）
+HS_PRODUCT = "701959"    # 玻纤机织物 其他（WITS 需 6 位）
+
+# HS7019 全球年进口额行业基线（USD 十亿）。仅在实时数据覆盖不足时作为下限，
+# 避免「只有美国报数」这类情况把市场规模评分打到不合理的低位。
+BASELINE_GLOBAL_IMPORT_B = 7.0
+
+
+# ============================================================
+# 基类：三级降级 + 缓存
+# ============================================================
+class BaseSource:
+    name = "base"
+    ttl = 3600
+    label = "数据源"
+    budget = 120.0     # 单次实时抓取的时间预算（秒），超时就返回已拿到的部分
+
+    def _fetch_live(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _fallback(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def fetch(self, force: bool = False, allow_live: bool = True) -> dict[str, Any]:
+        """取数。
+
+        allow_live=False 用于 Web 请求路径：只读缓存，缓存缺失直接用内置
+        基线，绝不发起可能耗时数分钟的外部请求。实时抓取交给后台线程或
+        命令行 `python scripts/free_data_sources.py --force`。
+        """
+        if not force:
+            hit = cache_get(self.name, self.ttl)
+            if hit:
+                hit["status"] = "cached"
+                return hit
+
+        if not allow_live:
+            stale = cache_get(self.name, ttl_seconds=10 ** 9)
+            if stale:
+                stale["status"] = "stale"
+                return stale
+            fb = self._fallback()
+            fb["source"] = self.label
+            fb["status"] = "fallback"
+            fb["reason"] = "缓存未预热；调用 /api/data-sources?refresh=1 触发后台抓取"
+            fb["fetched_at"] = _now_iso()
+            return fb
+
+        try:
+            data = self._fetch_live()
+            data["source"] = self.label
+            data["status"] = "live"
+            data["fetched_at"] = _now_iso()
+            cache_put(self.name, data, "live")
+            return data
+        except Exception as e:
+            logger.warning("%s live fetch failed: %s", self.name, e)
+            stale = cache_get(self.name, ttl_seconds=10 ** 9)
+            if stale:
+                stale["status"] = "stale"
+                stale["error"] = str(e)[:200]
+                return stale
+            fb = self._fallback()
+            fb["source"] = self.label
+            fb["status"] = "fallback"
+            fb["error"] = str(e)[:200]
+            fb["fetched_at"] = _now_iso()
+            return fb
+
+
+# ============================================================
+# 1. UN Comtrade —— 各国 HS7019 进口额与同比
+# ============================================================
+class ComtradeAdapter(BaseSource):
+    """UN Comtrade 各国 HS7019 进口额。
+
+    实测约束（均已验证）：
+      · 只能「单 reporter + 单 period」查询，传逗号列表或多年份都会返回空
+      · partnerCode=0 表示「世界」，返回该国该年的进口总额（1 行聚合值）
+      · 有速率限制，请求之间必须 sleep
+      · 免费的 /public/v1/preview/ 端点是抽样数据集，覆盖不全：实测只有
+        美国等少数报告国有非零值，德国等长期返回 0。要拿到完整覆盖，需在
+        https://comtradeplus.un.org 免费注册后把 Key 填到 COMTRADE_API_KEY，
+        本适配器会自动切到 /data/v1/get/ 正式端点。
     """
-    BASE = "https://comtradeapi.un.org/data/v1/get"
+    name = "comtrade_hs7019_v2"
+    ttl = 24 * 3600
+    label = "UN Comtrade"
+    BASE_PREVIEW = "https://comtradeapi.un.org/public/v1/preview/C/A/HS"
+    BASE_FULL = "https://comtradeapi.un.org/data/v1/get/C/A/HS"
+    THROTTLE = float(os.environ.get("COMTRADE_THROTTLE", "1.5"))
+    budget = 240.0
 
-    # HS code 7019 = Glass fibres, glass wool etc. + woven fabrics
-    # HS code 701940 = Glass fibre woven fabrics (最贴近玻璃纤维网格布)
-    HS_CODES = ["701940", "701951", "701952", "701959"]
+    # 年度完整性探针：选在这个数据集里报数最稳的三个国家
+    PROBE_REPORTERS = [842, 682, 484]   # 美国 / 沙特 / 墨西哥
 
-    def fetch(self) -> dict[str, Any]:
-        # 真实接入示例（如可联网且有授权):
-        # import urllib.request, urllib.parse
-        # params = urllib.parse.urlencode({
-        #     "reporterCode": "0", "period": "2024",
-        #     "cmdCode": self.HS_CODES[0], "flowCode": "M",  # Imports
-        #     "partnerCode": "all", "subscription-key": os.getenv("COMTRADE_KEY","")
-        # })
-        # url = f"{self.BASE}/C/A/HS?{params}"
-        # with urllib.request.urlopen(url, timeout=20) as r:
-        #     return json.loads(r.read().decode("utf-8"))
-        # 这里以离线模式返回带物理意义的示意数据。
+    # 年进口额低于此值的「市场」基本是数据假象。德国实际年进口约 10 亿美元，
+    # 预览端点却只返回 70 万，直接参与计算会让同比出现 +700968% 这种数字。
+    MIN_PLAUSIBLE_USD = 5_000_000
+
+    # 候选年度的探针总额不足上一年的这个比例，说明该年尚未报完，回退一年。
+    COMPLETENESS_RATIO = 0.70
+
+    @property
+    def api_key(self) -> str:
+        return os.environ.get("COMTRADE_API_KEY", "").strip()
+
+    def _query(self, reporter: int, year: int) -> dict[str, float] | None:
+        """返回该国该年进口额；无数据、为 0 或低于可信下限时返回 None。"""
+        params = {
+            "reporterCode": str(reporter),
+            "period": str(year),
+            "cmdCode": HS_CHAPTER,
+            "flowCode": "M",       # M = Imports
+            "partnerCode": "0",    # 0 = World
+        }
+        base = self.BASE_PREVIEW
+        if self.api_key:
+            base = self.BASE_FULL
+            params["subscription-key"] = self.api_key
+        payload = _http_json(f"{base}?{urllib.parse.urlencode(params)}")
+        rows = [r for r in (payload.get("data") or []) if str(r.get("cmdCode")) == HS_CHAPTER]
+        if not rows:
+            return None
+        value = float(rows[0].get("primaryValue") or 0)
+        if value < self.MIN_PLAUSIBLE_USD:
+            return None
         return {
-            "source": "UN Comtrade",
-            "status": "demo-mode (real api ready, requires subscription-key)",
+            "value_usd": value,
+            "net_weight_kg": float(rows[0].get("netWgt") or 0),
+        }
+
+    def _probe_total(self, year: int, memo: dict[int, float]) -> float:
+        """探针国在该年度的进口额之和（已过滤不可信小额）。"""
+        if year in memo:
+            return memo[year]
+        total = 0.0
+        for rep in self.PROBE_REPORTERS:
+            try:
+                v = self._query(rep, year)
+                if v:
+                    total += v["value_usd"]
+            except Exception as e:
+                logger.debug("comtrade probe %s %s: %s", rep, year, e)
+            time.sleep(self.THROTTLE)
+        memo[year] = total
+        return total
+
+    def _latest_year(self) -> int:
+        """选出「最新且已报完」的年度。
+
+        单看「某年有没有数据」会选中当年或去年这种只报了几个月的年度：
+        实测 2025 年美国 15.4 亿、沙特 1.9 亿，同比却是 -9% 与 -47%，
+        因为年度尚未报完。因此用探针国总额与上一年对比来判断完整性。
+        """
+        current = datetime.now(timezone.utc).year
+        memo: dict[int, float] = {}
+        for y in range(current - 1, current - 4, -1):
+            cur_total = self._probe_total(y, memo)
+            if cur_total <= 0:
+                continue
+            prev_total = self._probe_total(y - 1, memo)
+            ratio = (cur_total / prev_total) if prev_total > 0 else 1.0
+            logger.info(
+                "comtrade 年度完整性 %s: 探针总额 $%.0fM vs %s 的 $%.0fM（比值 %.2f）",
+                y, cur_total / 1e6, y - 1, prev_total / 1e6, ratio,
+            )
+            if ratio >= self.COMPLETENESS_RATIO:
+                return y
+        # 都不达标就取探针总额最大的年度
+        return max(memo, key=lambda k: memo[k]) if memo else current - 2
+
+    def _fetch_live(self) -> dict[str, Any]:
+        deadline = time.time() + self.budget
+        latest = self._latest_year()
+        prior = latest - 1
+        markets: list[dict[str, Any]] = []
+        truncated = False
+
+        for m in MARKETS:
+            if time.time() > deadline:
+                truncated = True
+                logger.warning("comtrade 超出 %.0fs 预算，已取 %d 个市场", self.budget, len(markets))
+                break
+            cur = prev = None
+            try:
+                cur = self._query(m.comtrade, latest)
+            except Exception as e:
+                logger.debug("comtrade %s %s: %s", m.name_en, latest, e)
+            time.sleep(self.THROTTLE)
+            try:
+                prev = self._query(m.comtrade, prior)
+            except Exception as e:
+                logger.debug("comtrade %s %s: %s", m.name_en, prior, e)
+            time.sleep(self.THROTTLE)
+
+            if not cur:
+                continue
+            # 两年都过了可信下限才算同比，并钳制在 ±80% 内挡住残留异常值
+            yoy = None
+            if prev:
+                yoy = round(max(-80.0, min(80.0, (cur["value_usd"] / prev["value_usd"] - 1) * 100)), 1)
+            markets.append({
+                "country": m.name_en,
+                "country_zh": m.name_zh,
+                "import_usd_million": round(cur["value_usd"] / 1e6, 1),
+                "net_weight_ton": round(cur["net_weight_kg"] / 1000, 0),
+                "yoy_growth_pct": yoy,
+                "avg_unit_price_usd_per_kg": (
+                    round(cur["value_usd"] / cur["net_weight_kg"], 2)
+                    if cur["net_weight_kg"] > 0 else None
+                ),
+            })
+
+        if not markets:
+            raise RuntimeError("Comtrade 未返回任何市场数据")
+
+        markets.sort(key=lambda x: x["import_usd_million"], reverse=True)
+        reported_m = sum(x["import_usd_million"] for x in markets)
+        # 用中位数而非均值：样本只有几个国家时，单个异常值会把均值整体带偏
+        yoys = sorted(x["yoy_growth_pct"] for x in markets if x["yoy_growth_pct"] is not None)
+        if yoys:
+            mid = len(yoys) // 2
+            median_yoy = yoys[mid] if len(yoys) % 2 else (yoys[mid - 1] + yoys[mid]) / 2
+        else:
+            median_yoy = 0.0
+        median_yoy = round(median_yoy, 1)
+
+        coverage = len(markets) / len(MARKETS)
+        is_partial = coverage < 0.6
+
+        # 覆盖不足时不能把「已报告国之和」当成全球规模（会严重低估），
+        # 以行业基线为下限，并显式标注 size_basis 供人工核查。
+        reported_b = round(reported_m / 1000, 2)
+        if is_partial:
+            size_b = max(reported_b, BASELINE_GLOBAL_IMPORT_B)
+            size_basis = "baseline-floor（免费预览端点覆盖不足，已用行业基线兜底）"
+        else:
+            size_b = reported_b
+            size_basis = "reported（目标市场实际进口额加总）"
+
+        return {
+            "hs_code": HS_CHAPTER,
+            "data_year": latest,
+            "base_year": prior,
+            "endpoint": "full(keyed)" if self.api_key else "public-preview",
+            "markets_reported": len(markets),
+            "markets_total": len(MARKETS),
+            "coverage_ratio": round(coverage, 2),
+            "is_partial": is_partial,
+            "truncated": truncated,
+            "size_basis": size_basis,
+            "hint": (
+                "覆盖不全是免费预览端点的抽样限制；到 https://comtradeplus.un.org "
+                "免费注册后填 COMTRADE_API_KEY 即可获得完整数据"
+                if is_partial else None
+            ),
             "metrics": {
-                "global_import_usd_billion": 3.2,
+                # 以下 3 个 key 是选品引擎的契约字段，勿改名
+                "global_import_usd_billion": size_b,
+                "reported_import_usd_billion": reported_b,
+                "yoy_growth_pct": median_yoy,
+                "yoy_basis": f"{len(yoys)} 个报告国进口额同比的中位数",
+                "top_importers_2024": [
+                    {"country": x["country"], "import_usd_million": x["import_usd_million"]}
+                    for x in markets
+                ],
+                "market_detail": markets,
+            },
+        }
+
+    def _fallback(self) -> dict[str, Any]:
+        return {
+            "hs_code": HS_CHAPTER,
+            "data_year": 2023,
+            "note": "内置基线（依据 2023 年公开统计整理），仅在 API 不可达时使用",
+            "metrics": {
+                "global_import_usd_billion": 7.22,
                 "yoy_growth_pct": 4.2,
                 "top_importers_2024": [
-                    {"country": "USA", "import_usd_million": 612},
-                    {"country": "Germany", "import_usd_million": 487},
-                    {"country": "France", "import_usd_million": 312},
-                    {"country": "Saudi Arabia", "import_usd_million": 268},
-                    {"country": "UAE", "import_usd_million": 192},
-                    {"country": "Vietnam", "import_usd_million": 178},
-                    {"country": "India", "import_usd_million": 165},
-                    {"country": "Brazil", "import_usd_million": 142},
+                    {"country": "USA", "import_usd_million": 1598.9},
+                    {"country": "Germany", "import_usd_million": 987.0},
+                    {"country": "France", "import_usd_million": 512.0},
+                    {"country": "India", "import_usd_million": 365.0},
+                    {"country": "Mexico", "import_usd_million": 342.0},
+                    {"country": "Vietnam", "import_usd_million": 278.0},
+                    {"country": "Saudi Arabia", "import_usd_million": 268.0},
+                    {"country": "Turkey", "import_usd_million": 231.0},
+                    {"country": "Brazil", "import_usd_million": 192.0},
+                    {"country": "UAE", "import_usd_million": 178.0},
                 ],
-                "demand_index_2024_vs_2020": 1.27,
+                "market_detail": [],
             },
-            "fetched_at": _now_iso(),
         }
 
 
 # ============================================================
-# 2. Google Trends (搜索热度)
+# 2. World Bank WITS —— MFN 关税
 # ============================================================
-class GoogleTrendsAdapter:
-    """使用 pytrends 或直接 HTTP 调用.
-       pip install pytrends  ;  Or use agent-browser when needed.
-    """
-    KEYWORDS = ["fiberglass mesh", "alkali resistant mesh", "EIFS mesh", "drywall joint tape", "waterproofing mesh"]
+class WITSAdapter(BaseSource):
+    """WITS SDMX 接口，无需 Key。必须用 6 位 HS 编码。
 
-    def fetch(self) -> dict[str, Any]:
-        # from pytrends.request import TrendReq
-        # pytrends = TrendReq(hl='en-US', tz=0)
-        # pytrends.build_payload(self.KEYWORDS, timeframe='today 12-m', geo='')
-        # df = pytrends.interest_over_time()
-        # return df.mean().to_dict()
-        # 这里给示意数据（不同关键词近 12 月 vs 上 12 月变化）:
+    性能陷阱：查询不存在的年份时，WITS 要花约 30 秒才返回 404。逐国逐年
+    重试会把时间预算全烧在无效年份上（实测 10 国 × 2 年 = 290s，一个结果
+    都拿不到）。所以先用一个参照国探测出有数据的年份，再用该年份查所有国家。
+    """
+    name = "wits_tariff_701959_v2"
+    ttl = 7 * 24 * 3600
+    label = "World Bank WITS"
+    THROTTLE = float(os.environ.get("WITS_THROTTLE", "0.3"))
+    YEARS = [2021, 2020, 2022]   # 实测 2021 有数据，2022 无（返回 404）
+    PROBE_REPORTER = 840         # 美国，报数最全
+    REQ_TIMEOUT = int(os.environ.get("WITS_TIMEOUT", "15"))
+    budget = 150.0
+
+    def _query(self, reporter_num: int, year: int) -> float | None:
+        url = (
+            "https://wits.worldbank.org/API/V1/SDMX/V21/datasource/TRN"
+            f"/reporter/{reporter_num}/partner/000/product/{HS_PRODUCT}"
+            f"/year/{year}/datatype/reported?format=JSON"
+        )
+        payload = _http_json(url, timeout=self.REQ_TIMEOUT)
+        try:
+            series = payload["dataSets"][0]["series"]
+            first = next(iter(series.values()))
+            return round(float(first["observations"]["0"][0]), 2)
+        except (KeyError, IndexError, StopIteration, TypeError, ValueError):
+            return None
+
+    def _discover_year(self, deadline: float) -> int | None:
+        """探测出一个确实有数据的年份，避免每个国家都去撞无效年份。"""
+        for y in self.YEARS:
+            if time.time() > deadline:
+                return None
+            try:
+                if self._query(self.PROBE_REPORTER, y) is not None:
+                    logger.info("wits 采用年份 %s", y)
+                    return y
+            except Exception as e:
+                logger.debug("wits 年份探测 %s: %s", y, e)
+            time.sleep(self.THROTTLE)
+        return None
+
+    def _fetch_live(self) -> dict[str, Any]:
+        deadline = time.time() + self.budget
+        year = self._discover_year(deadline)
+        if year is None:
+            raise RuntimeError("WITS 无可用年份（接口超时或数据缺失）")
+
+        overview: list[dict[str, Any]] = []
+        for m in MARKETS:
+            tariff = None
+            if time.time() > deadline:
+                logger.warning("wits 超出 %.0fs 预算，剩余 %d 国用基线关税",
+                               self.budget, len(MARKETS) - len(overview))
+            else:
+                try:
+                    tariff = self._query(m.wits, year)
+                except Exception as e:
+                    logger.debug("wits %s %s: %s", m.name_en, year, e)
+                time.sleep(self.THROTTLE)
+            overview.append({
+                "country": m.name_en,
+                "country_zh": m.name_zh,
+                "avg_mfn_tariff_pct": tariff if tariff is not None else _TARIFF_BASELINE.get(m.name_en),
+                "tariff_code": HS_PRODUCT,
+                "data_year": year if tariff is not None else None,
+                "is_reported": tariff is not None,
+            })
+
+        if not any(o["is_reported"] for o in overview):
+            raise RuntimeError("WITS 未返回任何关税数据")
+
         return {
-            "source": "Google Trends",
-            "status": "demo-mode (real api requires pytrends / rate-limit)",
+            "hs_code": HS_PRODUCT,
+            "data_year": year,
+            "reported_count": sum(1 for o in overview if o["is_reported"]),
+            "metrics": {
+                "tariff_overview": overview,
+                "nontariff_barriers_index": _NTB_INDEX,
+            },
+        }
+
+    def _fallback(self) -> dict[str, Any]:
+        return {
+            "hs_code": HS_PRODUCT,
+            "note": "内置基线关税",
+            "metrics": {
+                "tariff_overview": [
+                    {
+                        "country": m.name_en,
+                        "country_zh": m.name_zh,
+                        "avg_mfn_tariff_pct": _TARIFF_BASELINE.get(m.name_en),
+                        "tariff_code": HS_PRODUCT,
+                        "is_reported": False,
+                    }
+                    for m in MARKETS
+                ],
+                "nontariff_barriers_index": _NTB_INDEX,
+            },
+        }
+
+
+_TARIFF_BASELINE = {
+    "USA": 3.58, "Germany": 7.0, "France": 7.0, "Saudi Arabia": 5.0,
+    "UAE": 5.0, "Vietnam": 12.0, "India": 10.0, "Brazil": 12.6,
+    "Turkey": 7.0, "Mexico": 10.0,
+}
+
+# 非关税壁垒（需要人工维护的行业知识，非 API 可得）
+_NTB_INDEX = {
+    "USA": "low", "Germany": "medium-CE-marking", "France": "medium-CE-marking",
+    "Saudi Arabia": "low-SASO", "UAE": "low-ECAS", "Vietnam": "low",
+    "India": "medium-BIS", "Brazil": "medium-INMETRO", "Turkey": "medium-CE",
+    "Mexico": "medium-NOM",
+}
+
+
+# ============================================================
+# 3. World Bank Indicators —— 宏观需求动能
+# ============================================================
+class WorldBankAdapter(BaseSource):
+    """GDP / GDP 增速 / 城镇人口增速 → 建筑需求动能代理指标。无需 Key。"""
+    name = "worldbank_macro"
+    ttl = 7 * 24 * 3600
+    label = "World Bank Indicators"
+    INDICATORS = {
+        "gdp_usd": "NY.GDP.MKTP.CD",
+        "gdp_growth_pct": "NY.GDP.MKTP.KD.ZG",
+        "urban_growth_pct": "SP.URB.GROW",
+    }
+
+    def _query(self, iso3: str, indicator: str) -> tuple[float, int] | None:
+        url = (
+            f"https://api.worldbank.org/v2/country/{iso3}/indicator/{indicator}"
+            "?format=json&per_page=10&date=2019:2024"
+        )
+        payload = _http_json(url)
+        if not isinstance(payload, list) or len(payload) < 2 or not payload[1]:
+            return None
+        for row in payload[1]:                      # 已按年份倒序
+            if row.get("value") is not None:
+                return float(row["value"]), int(row["date"])
+        return None
+
+    def _fetch_live(self) -> dict[str, Any]:
+        iso_list = ";".join(m.wb for m in MARKETS)
+        out: dict[str, dict[str, Any]] = {}
+        for key, code in self.INDICATORS.items():
+            url = (
+                f"https://api.worldbank.org/v2/country/{iso_list}/indicator/{code}"
+                "?format=json&per_page=400&date=2019:2024"
+            )
+            payload = _http_json(url)
+            if not isinstance(payload, list) or len(payload) < 2 or not payload[1]:
+                continue
+            best: dict[str, tuple[float, int]] = {}
+            for row in payload[1]:
+                iso = row.get("countryiso3code")
+                val = row.get("value")
+                if not iso or val is None:
+                    continue
+                year = int(row["date"])
+                if iso not in best or year > best[iso][1]:
+                    best[iso] = (float(val), year)
+            for iso, (val, year) in best.items():
+                out.setdefault(iso, {})[key] = round(val, 2)
+                out[iso][f"{key}_year"] = year
+
+        if not out:
+            raise RuntimeError("World Bank 未返回数据")
+
+        by_market = []
+        for m in MARKETS:
+            d = out.get(m.wb, {})
+            gdp_g = d.get("gdp_growth_pct") or 0
+            urb_g = d.get("urban_growth_pct") or 0
+            # 建筑需求动能：GDP 增速 60% + 城镇化增速 40%，归一到 0-100
+            momentum = max(0.0, min(100.0, (gdp_g * 0.6 + urb_g * 0.4) * 12.5))
+            by_market.append({
+                "country": m.name_en,
+                "country_zh": m.name_zh,
+                "gdp_usd_billion": round(d["gdp_usd"] / 1e9, 1) if d.get("gdp_usd") else None,
+                "gdp_growth_pct": d.get("gdp_growth_pct"),
+                "urban_growth_pct": d.get("urban_growth_pct"),
+                "construction_momentum_index": round(momentum, 1),
+                "data_year": d.get("gdp_usd_year"),
+            })
+        by_market.sort(key=lambda x: x["construction_momentum_index"], reverse=True)
+        return {
+            "indicators": list(self.INDICATORS.values()),
+            "metrics": {
+                "macro_by_market": by_market,
+                "top_momentum_market": by_market[0]["country"] if by_market else None,
+            },
+        }
+
+    def _fallback(self) -> dict[str, Any]:
+        return {
+            "note": "内置基线宏观数据",
+            "metrics": {
+                "macro_by_market": [
+                    {"country": "India", "country_zh": "印度", "gdp_growth_pct": 7.2, "urban_growth_pct": 2.3,
+                     "construction_momentum_index": 65.5},
+                    {"country": "Vietnam", "country_zh": "越南", "gdp_growth_pct": 5.1, "urban_growth_pct": 2.9,
+                     "construction_momentum_index": 52.8},
+                    {"country": "Saudi Arabia", "country_zh": "沙特", "gdp_growth_pct": 4.4, "urban_growth_pct": 1.7,
+                     "construction_momentum_index": 41.5},
+                    {"country": "UAE", "country_zh": "阿联酋", "gdp_growth_pct": 3.6, "urban_growth_pct": 1.5,
+                     "construction_momentum_index": 34.5},
+                    {"country": "Turkey", "country_zh": "土耳其", "gdp_growth_pct": 4.5, "urban_growth_pct": 1.9,
+                     "construction_momentum_index": 43.3},
+                ],
+                "top_momentum_market": "India",
+            },
+        }
+
+
+# ============================================================
+# 4. Google Trends —— 关键词热度
+# ============================================================
+# 选品引擎依赖这 8 个 key，勿改名
+TREND_KEYWORDS = [
+    "fiberglass mesh",              # 锚点关键词（两批共用，用于归一化）
+    "alkali resistant mesh",
+    "EIFS mesh",
+    "drywall joint tape",
+    "waterproofing mesh",
+    "solar PV reinforcement mesh",
+    "marine fiberglass mesh",
+    "GRC reinforcement mesh",
+]
+
+
+class GoogleTrendsAdapter(BaseSource):
+    """pytrends。Google 限制单次最多 5 个词，故分两批用锚点词归一化。
+
+    重要约束：玻纤网格布这类小众 B2B 词的全球搜索量极低，归一化后常年
+    趋近 0。此时 Google 的抽样噪声会让同比出现 +400% 这种假信号，因此
+    低于 MIN_VOLUME 的关键词一律不输出同比，交由 Comtrade 的真实进口
+    增速兜底（见 DataAggregator.score_one_sku）。
+    """
+    name = "google_trends_v2"
+    ttl = 12 * 3600
+    label = "Google Trends"
+    ANCHOR = TREND_KEYWORDS[0]
+    MIN_VOLUME = 5.0
+
+    def _fetch_live(self) -> dict[str, Any]:
+        from pytrends.request import TrendReq  # 延迟导入，未安装时走降级
+
+        # 不传 retries / backoff_factor：pytrends 会用 urllib3 v1 已废弃的
+        # method_whitelist 参数构造 Retry，在 urllib3 v2 下直接抛 TypeError
+        pytrends = TrendReq(hl="en-US", tz=0, timeout=(10, 25))
+
+        batch1 = TREND_KEYWORDS[0:5]
+        batch2 = [self.ANCHOR] + TREND_KEYWORDS[5:8]
+
+        # Google 已不接受 "today 24-m" 这类相对区间（返回 400），必须给显式日期
+        today = datetime.now(timezone.utc).date()
+        start = today.replace(year=today.year - 2)
+        timeframe = f"{start.isoformat()} {today.isoformat()}"
+
+        def run(kws: list[str]):
+            pytrends.build_payload(kws, timeframe=timeframe, geo="")
+            df = pytrends.interest_over_time()
+            if df is None or df.empty:
+                raise RuntimeError(f"Trends 空结果: {kws}")
+            if "isPartial" in df.columns:
+                df = df.drop(columns=["isPartial"])
+            n = len(df)
+            recent = df.iloc[n // 2:]      # 近 12 个月
+            older = df.iloc[: n // 2]      # 上 12 个月
+            return recent.mean().to_dict(), older.mean().to_dict()
+
+        r1, o1 = run(batch1)
+        time.sleep(2)
+        r2, o2 = run(batch2)
+
+        # 用锚点词把第二批缩放到第一批的量纲
+        scale = (r1[self.ANCHOR] / r2[self.ANCHOR]) if r2.get(self.ANCHOR) else 1.0
+
+        def measure(recent: float, older: float) -> dict[str, Any]:
+            if recent < self.MIN_VOLUME or older < self.MIN_VOLUME:
+                return {
+                    "score": round(recent, 1),
+                    "yoy_change_pct": None,
+                    "confidence": "low",
+                    "note": f"归一化搜索量 < {self.MIN_VOLUME}，同比不可信，改用 Comtrade 进口增速",
+                }
+            yoy = (recent / older - 1) * 100
+            return {
+                "score": round(recent, 1),
+                "yoy_change_pct": round(max(-60.0, min(60.0, yoy)), 1),
+                "confidence": "high",
+            }
+
+        interest: dict[str, dict[str, Any]] = {}
+        for kw in batch1:
+            interest[kw] = measure(r1[kw], o1[kw])
+        for kw in batch2[1:]:
+            interest[kw] = measure(r2[kw] * scale, o2[kw] * scale)
+
+        trusted = {k: v for k, v in interest.items() if v["confidence"] == "high"}
+        top = (
+            max(trusted.items(), key=lambda kv: kv[1]["yoy_change_pct"])[0]
+            if trusted else None
+        )
+        return {
+            "min_volume_threshold": self.MIN_VOLUME,
+            "trusted_keywords": len(trusted),
+            "timeframe": f"{timeframe}（近12月 vs 上12月）",
+            "anchor_scale": round(scale, 3),
+            "metrics": {
+                "keyword_interest_2024": interest,
+                "top_growing_query": top,
+            },
+        }
+
+    def _fallback(self) -> dict[str, Any]:
+        return {
+            "note": "内置基线热度（pytrends 不可用或被限流时使用）",
             "metrics": {
                 "keyword_interest_2024": {
-                    "fiberglass mesh": {"score": 72, "yoy_change_pct": +6.5},
-                    "alkali resistant mesh": {"score": 58, "yoy_change_pct": +11.2},
-                    "EIFS mesh": {"score": 49, "yoy_change_pct": +3.0},
-                    "drywall joint tape": {"score": 86, "yoy_change_pct": +1.8},
-                    "waterproofing mesh": {"score": 65, "yoy_change_pct": +8.7},
-                    "solar PV reinforcement mesh": {"score": 34, "yoy_change_pct": +18.4},
-                    "marine fiberglass mesh": {"score": 28, "yoy_change_pct": +14.0},
-                    "GRC reinforcement mesh": {"score": 41, "yoy_change_pct": +5.5},
+                    kw: {"score": s, "yoy_change_pct": y, "confidence": "baseline"}
+                    for kw, s, y in [
+                        ("fiberglass mesh", 72.0, 6.5),
+                        ("alkali resistant mesh", 58.0, 11.2),
+                        ("EIFS mesh", 49.0, 3.0),
+                        ("drywall joint tape", 86.0, 1.8),
+                        ("waterproofing mesh", 65.0, 8.7),
+                        ("solar PV reinforcement mesh", 34.0, 18.4),
+                        ("marine fiberglass mesh", 28.0, 14.0),
+                        ("GRC reinforcement mesh", 41.0, 5.5),
+                    ]
                 },
                 "top_growing_query": "solar PV reinforcement mesh",
             },
-            "fetched_at": _now_iso(),
         }
 
 
 # ============================================================
-# 3. World Bank WITS (关税/贸易壁垒)
-# ============================================================
-class WITSAdapter:
-    """World Bank WITS - 全球贸易数据 + 关税
-       https://wits.worldbank.org/API/SDMX/V21/datasource/tradestats-trade/data
-    """
-    def fetch(self) -> dict[str, Any]:
-        return {
-            "source": "World Bank WITS",
-            "status": "demo-mode (real api needs WITS_URL=http://wits.worldbank.org/API/V1/SDMX/V21)",
-            "metrics": {
-                "tariff_overview": [
-                    {"country": "USA", "avg_mfn_tariff_pct": 5.8, "tariff_code": "7019.40"},
-                    {"country": "EU", "avg_mfn_tariff_pct": 4.5, "tariff_code": "7019.40"},
-                    {"country": "Saudi Arabia", "avg_mfn_tariff_pct": 5.0, "tariff_code": "7019.40"},
-                    {"country": "UAE", "avg_mfn_tariff_pct": 5.0, "tariff_code": "7019.40"},
-                    {"country": "Vietnam", "avg_mfn_tariff_pct": 8.0, "tariff_code": "7019.40"},
-                    {"country": "India", "avg_mfn_tariff_pct": 10.0, "tariff_code": "7019.40"},
-                    {"country": "Brazil", "avg_mfn_tariff_pct": 12.0, "tariff_code": "7019.40"},
-                    {"country": "Turkey", "avg_mfn_tariff_pct": 6.5, "tariff_code": "7019.40"},
-                    {"country": "Iraq", "avg_mfn_tariff_pct": 5.0, "tariff_code": "7019.40"},
-                    {"country": "Mexico", "avg_mfn_tariff_pct": 7.5, "tariff_code": "7019.40"},
-                ],
-                "nontariff_barriers_index": {
-                    "USA": "low", "EU": "medium-CE-marking", "Saudi Arabia": "low-SASO",
-                    "Vietnam": "low", "India": "medium-BIS", "Brazil": "medium-INMETRO",
-                    "Turkey": "medium-CE", "Iraq": "high", "Mexico": "medium-NOM",
-                },
-            },
-            "fetched_at": _now_iso(),
-        }
-
-
-# ============================================================
-# 4. Google Search 关键词热度 (模拟)
-# ============================================================
-class GoogleSearchAdapter:
-    """使用 agent-browser 或 scrapling 获取 SERP 数据。"""
-    def fetch(self) -> dict[str, Any]:
-        return {
-            "source": "Google Search SERPs",
-            "status": "demo-mode (real api via scrapling or google-custom-search)",
-            "metrics": {
-                "competitor_count_for_keyword": {
-                    "fiberglass mesh": "12.4M results",
-                    "alkali resistant mesh": "1.8M results",
-                    "EIFS mesh": "0.42M results",
-                    "waterproofing mesh": "3.1M results",
-                    "drywall joint tape": "8.7M results",
-                },
-                "auction_ad_density": {
-                    "fiberglass mesh": "high (4-7 ads)",
-                    "alkali resistant mesh": "low (0-2 ads)",
-                    "EIFS mesh": "low (0-1 ads)",
-                    "waterproofing mesh": "medium (2-4 ads)",
-                },
-            },
-            "fetched_at": _now_iso(),
-        }
-
-
-# ============================================================
-# 5. 阿里国际站 (店铺内免费数据) - 仅示意
-# ============================================================
-class AlibabaAdapter:
-    """阿里国际站数据管家 - 仅注册店铺才能获取，本类示意。
-       真实接入请用 lark-im / browser-automation-toolbox 爬取后台。"""
-    def fetch(self) -> dict[str, Any]:
-        return {
-            "source": "Alibaba Data Bank (店铺内免费)",
-            "status": "demo-mode (requires store login)",
-            "metrics": {
-                "category_top_keywords": [
-                    {"keyword": "fiberglass mesh", "index": 9421, "change_pct": +12},
-                    {"keyword": "alkali resistant fiberglass mesh", "index": 7320, "change_pct": +18},
-                    {"keyword": "self adhesive fiberglass mesh tape", "index": 5102, "change_pct": +9},
-                    {"keyword": "drywall joint tape", "index": 4960, "change_pct": +4},
-                    {"keyword": "waterproofing mesh", "index": 4801, "change_pct": +13},
-                ],
-                "buyer_distribution_top": [
-                    {"country": "USA", "share_pct": 14.2},
-                    {"country": "Saudi Arabia", "share_pct": 9.8},
-                    {"country": "UAE", "share_pct": 8.7},
-                    {"country": "India", "share_pct": 7.3},
-                    {"country": "Vietnam", "share_pct": 6.1},
-                ],
-                "rfq_growth_yoy": "+24.6%",
-            },
-            "fetched_at": _now_iso(),
-        }
-
-
-# ============================================================
-# 顶层：根据关键词聚合所有数据源 → 标准化输出
+# 顶层聚合
 # ============================================================
 class DataAggregator:
-    def __init__(self) -> None:
+    """所有数据源的统一入口。实例内做一次内存缓存，避免单次请求重复取数。
+
+    allow_live 默认 False：Web 请求只读缓存，保证响应在毫秒级。
+    后台刷新线程和命令行用 allow_live=True。
+    """
+
+    def __init__(self, allow_live: bool = False) -> None:
         self.comtrade = ComtradeAdapter()
-        self.trends = GoogleTrendsAdapter()
         self.wits = WITSAdapter()
-        self.search = GoogleSearchAdapter()
-        self.alibaba = AlibabaAdapter()
+        self.worldbank = WorldBankAdapter()
+        self.trends = GoogleTrendsAdapter()
+        self.allow_live = allow_live
+        self._memo: dict[str, dict] = {}
 
-    def fetch_all(self) -> dict[str, Any]:
+    # 兼容旧属性名
+    @property
+    def search(self):
+        return self.trends
+
+    def _cached(self, adapter: BaseSource, force: bool = False) -> dict[str, Any]:
+        if force or adapter.name not in self._memo:
+            self._memo[adapter.name] = adapter.fetch(
+                force=force, allow_live=self.allow_live or force
+            )
+        return self._memo[adapter.name]
+
+    def fetch_all(self, force: bool = False) -> dict[str, Any]:
+        comtrade = self._cached(self.comtrade, force)
+        wits = self._cached(self.wits, force)
+        wb = self._cached(self.worldbank, force)
+        trends = self._cached(self.trends, force)
         return {
-            "comtrade": self.comtrade.fetch(),
-            "trends": self.trends.fetch(),
-            "wits": self.wits.fetch(),
-            "search": self.search.fetch(),
-            "alibaba": self.alibaba.fetch(),
+            "generated_at": _now_iso(),
+            "summary": {
+                "live_sources": sum(
+                    1 for d in (comtrade, wits, wb, trends) if d.get("status") in ("live", "cached")
+                ),
+                "total_sources": 4,
+                "statuses": {
+                    "comtrade": comtrade.get("status"),
+                    "wits": wits.get("status"),
+                    "worldbank": wb.get("status"),
+                    "trends": trends.get("status"),
+                },
+            },
+            "comtrade": comtrade,
+            "wits": wits,
+            "worldbank": wb,
+            "trends": trends,
         }
 
-    # 对单个 SKU 关键词，提取相应评分维度
+    # ── 供选品引擎调用 ─────────────────────────────
+    def market_size_usd_billion(self) -> float:
+        return self._cached(self.comtrade)["metrics"]["global_import_usd_billion"]
+
+    def tariff_map(self) -> dict[str, float]:
+        rows = self._cached(self.wits)["metrics"]["tariff_overview"]
+        return {r["country"]: r.get("avg_mfn_tariff_pct") for r in rows if r.get("avg_mfn_tariff_pct")}
+
+    def momentum_map(self) -> dict[str, float]:
+        rows = self._cached(self.worldbank)["metrics"]["macro_by_market"]
+        return {r["country"]: r.get("construction_momentum_index") or 0 for r in rows}
+
     def score_one_sku(self, sku: dict) -> dict[str, Any]:
-        name = sku.get("name_en", "")
-        kw = name.lower()
-        trends = self.trends.fetch()["metrics"]["keyword_interest_2024"]
-        keywords_map = {
-            "alkali-resistant fiberglass mesh": trends["alkali resistant mesh"],
-            "waterproof reinforcement fiberglass mesh": trends["waterproofing mesh"],
-            "self-adhesive fiberglass joint tape": trends["drywall joint tape"],
-            "marine engineering anti-corrosion mesh": trends["marine fiberglass mesh"],
-            "solar pv reinforcement fiberglass mesh": trends["solar PV reinforcement mesh"],
-            "grc permanent reinforcement mesh": trends["GRC reinforcement mesh"],
-            "fire-resistant high-temp coated fiberglass mesh": trends["fiberglass mesh"],
-            "interior drywall joint tape": trends["drywall joint tape"],
-            "eifs decorative panel reinforcement mesh": trends["EIFS mesh"],
-            "mosaic backing fiberglass mesh": trends["fiberglass mesh"],
-            "roof waterproofing reinforcement mesh": trends["waterproofing mesh"],
-            "custom fiberglass mesh": trends["fiberglass mesh"],
-        }
-        trend_hit = None
-        for k, v in keywords_map.items():
-            if all(word in k for word in kw.split()[:3] if len(word) > 4):
-                trend_hit = v
-                break
-        if not trend_hit:
-            trend_hit = trends["fiberglass mesh"]
+        """把 SKU 映射到最贴近的 Trends 关键词，返回增速维度输入。"""
+        trends = self._cached(self.trends)["metrics"]["keyword_interest_2024"]
+        comtrade = self._cached(self.comtrade)["metrics"]
 
-        # 简单确定性打分（归一到 0-10）
+        name = (sku.get("name_en") or "").lower()
+        scen = " ".join(sku.get("scenarios", []))
+        rules = [
+            (("marine", "anti-corrosion", "海工"), "marine fiberglass mesh"),
+            (("solar", "pv", "光伏"), "solar PV reinforcement mesh"),
+            (("grc",), "GRC reinforcement mesh"),
+            (("joint tape", "drywall", "石膏板", "接缝"), "drywall joint tape"),
+            (("waterproof", "roof", "防水"), "waterproofing mesh"),
+            (("eifs", "decorative", "抹面"), "EIFS mesh"),
+            (("alkali", "抗碱"), "alkali resistant mesh"),
+        ]
+        hit_kw = "fiberglass mesh"
+        haystack = f"{name} {scen}".lower()
+        for needles, kw in rules:
+            if any(n in haystack for n in needles):
+                hit_kw = kw
+                break
+
+        t = trends.get(hit_kw) or trends["fiberglass mesh"]
+        comtrade_yoy = comtrade["yoy_growth_pct"]
+
+        # Trends 同比可信就用它，否则退回 Comtrade 的真实进口增速
+        trend_yoy = t.get("yoy_change_pct")
+        if trend_yoy is None:
+            growth_yoy = comtrade_yoy
+            growth_basis = "comtrade_import_yoy"
+        else:
+            growth_yoy = trend_yoy
+            growth_basis = f"google_trends[{t.get('confidence', 'n/a')}]"
+
         return {
-            "trend_score": min(10.0, trend_hit["score"] / 10.0),
-            "yoy_change_pct": trend_hit["yoy_change_pct"],
-            "global_import_usd_billion": self.comtrade.fetch()["metrics"]["global_import_usd_billion"],
-            "yoy_growth_pct": self.comtrade.fetch()["metrics"]["yoy_growth_pct"],
+            "matched_keyword": hit_kw,
+            "trend_score": min(10.0, t["score"] / 10.0),
+            "trend_confidence": t.get("confidence", "n/a"),
+            "yoy_change_pct": growth_yoy,
+            "growth_basis": growth_basis,
+            "global_import_usd_billion": comtrade["global_import_usd_billion"],
+            "yoy_growth_pct": comtrade_yoy,
         }
+
+
+def refresh_all(force: bool = True) -> dict[str, Any]:
+    """给定时任务/后台线程用：强制刷新全部数据源（会走真实网络，耗时数分钟）。"""
+    res = DataAggregator(allow_live=True).fetch_all(force=force)
+    return res["summary"]
+
+
+def warm_up() -> dict[str, Any]:
+    """只补齐缓存缺失或已过期的数据源，已新鲜的跳过。"""
+    agg = DataAggregator(allow_live=True)
+    filled = {}
+    for ad in (agg.comtrade, agg.wits, agg.worldbank, agg.trends):
+        if cache_get(ad.name, ad.ttl):
+            filled[ad.name] = "fresh"
+            continue
+        filled[ad.name] = ad.fetch(force=True).get("status")
+    return filled
 
 
 if __name__ == "__main__":
-    agg = DataAggregator()
-    res = agg.fetch_all()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    force = "--force" in sys.argv
+    if "--warm-up" in sys.argv:
+        print(json.dumps(warm_up(), ensure_ascii=False, indent=2))
+        sys.exit(0)
+    agg = DataAggregator(allow_live=True)
+    t0 = time.time()
+    res = agg.fetch_all(force=force)
     print(json.dumps(res, indent=2, ensure_ascii=False))
+    print(f"\n耗时 {time.time() - t0:.1f}s   状态 {res['summary']['statuses']}")
