@@ -2,6 +2,20 @@
 # 赣丰玻纤 · 数据飞轮系统 - Zeabur 部署指南
 # =================================================================
 
+## ✅ 当前部署状态（2026-09-05 已上线）
+
+| 项目 | 值 |
+|------|------|
+| **访问地址** | https://ganfeng-trade.preview.aliyun-zeabur.cn |
+| **管理后台** | https://ganfeng-trade.preview.aliyun-zeabur.cn/admin |
+| Zeabur 项目 | ganfeng-fiberglass-ai（阿里云中国区） |
+| 服务名 | ganfeng-ai-trade |
+| Git commit | bb81739 (main) |
+| 状态 | RUNNING · 域名 PROVISIONED |
+
+> 注：项目部署在 Zeabur 阿里云中国区域，生成域名后缀为 `*.preview.aliyun-zeabur.cn`（预备案域名），而非国际区的 `*.zeabur.app`。
+> CLI 创建域名正确语法：`zeabur domain create --id <服务ID> --env-id <环境ID> -g --domain <前缀> -y -i=false`（`--domain` 只传前缀，不带域名后缀）。
+
 ## 📦 项目简介
 
 基于 Flask + 飞书多维表格 + AI 的外贸部数据飞轮系统：

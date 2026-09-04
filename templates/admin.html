@@ -42,16 +42,20 @@
 
   <!-- ========== Sourcing Score Table ========== -->
   <div class="admin-section">
-    <h2>🤖 选品评分 · 12 SKU × 6 维</h2>
+    <h2>🤖 选品评分 · 12 SKU × 6 维 + AI 推荐</h2>
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+      <button onclick="refreshSourcing()" class="btn-primary" style="font-size:13px;padding:7px 14px">🤖 重新评分（AI 生成推荐理由）</button>
+      <span style="font-size:12px;color:var(--ink-3)" id="sourcing-status">缓存数据（6h 刷新一次）</span>
+    </div>
     <table class="admin-table" id="sourcing-table">
       <thead>
         <tr>
           <th>排名</th><th>SKU</th><th>名称</th>
           <th>总分</th><th>市场</th><th>增速</th><th>匹配</th><th>毛利</th><th>壁垒</th><th>出海</th>
-          <th>Tier</th>
+          <th>Tier</th><th>AI 推荐理由</th><th>目标市场</th><th>建议动作</th>
         </tr>
       </thead>
-      <tbody><tr><td colspan="11" class="loading">加载中...</td></tr></tbody>
+      <tbody><tr><td colspan="14" class="loading">加载中...</td></tr></tbody>
     </table>
   </div>
 
@@ -178,11 +182,14 @@ async function loadSourcing(){
   const data = await fetch('/api/sourcing').then(r => r.json());
   const tbody = document.querySelector('#sourcing-table tbody');
   if (!data.scores || data.scores.length === 0){
-    tbody.innerHTML = '<tr><td colspan="11" class="loading">暂无数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="loading">暂无数据</td></tr>';
     return;
   }
   tbody.innerHTML = data.scores.map((r, i) => {
     const d = r.dimensions;
+    const aiReason = r.ai_reason || '—';
+    const targetMarket = r.target_market || '—';
+    const suggestedAction = r.suggested_action || '—';
     return `
       <tr>
         <td><strong>#${i+1}</strong></td>
@@ -196,9 +203,27 @@ async function loadSourcing(){
         <td>${d.barrier.score}</td>
         <td>${d.sea.score}</td>
         <td><span class="tier-badge tier-${r.tier}">${r.tier}</span></td>
+        <td style="font-size:12px;color:var(--ink-2);max-width:200px">${aiReason}</td>
+        <td style="font-size:12px;color:var(--green);font-weight:600">${targetMarket}</td>
+        <td style="font-size:12px;color:var(--warm)">${suggestedAction}</td>
       </tr>
     `;
   }).join('');
+  const status = document.getElementById('sourcing-status');
+  if (status) status.textContent = '生成时间: ' + (data.generated_at || '—');
+}
+
+async function refreshSourcing(){
+  const status = document.getElementById('sourcing-status');
+  if (status) status.textContent = '⏳ AI 正在生成推荐理由...';
+  const tbody = document.querySelector('#sourcing-table tbody');
+  tbody.innerHTML = '<tr><td colspan="14" class="loading">⏳ AI 正在分析评分数据并生成推荐理由...</td></tr>';
+  try {
+    await fetch('/api/sourcing?refresh=1');
+    await loadSourcing();
+  } catch(e) {
+    if (status) status.textContent = '❌ 刷新失败: ' + e.message;
+  }
 }
 
 async function refreshAll(){

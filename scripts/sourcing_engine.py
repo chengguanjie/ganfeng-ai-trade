@@ -17,11 +17,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+import logging
 from typing import Any
+
+logger = logging.getLogger("sourcing")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from free_data_sources import DataAggregator  # type: ignore
+from llm_client import chat_completion, is_available  # type: ignore
 
 DATA_DIR = os.path.join(THIS_DIR, "..", "data")
 SKU_FILE = os.path.join(DATA_DIR, "sku.json")
@@ -207,11 +211,77 @@ def _recommend_actions(sku: dict, score: float) -> list[str]:
     return actions
 
 
+def _generate_ai_insights(results: list[dict[str, Any]]) -> None:
+    """用 DeepSeek 为 Top 5 SKU 生成 AI 推荐理由（原地修改 results）"""
+    if not is_available():
+        logger.info("DeepSeek not available, skipping AI insights")
+        return
+
+    top5 = results[:5]
+    sku_summaries = []
+    for r in top5:
+        d = r["dimensions"]
+        sku_summaries.append(
+            f"- {r['sku']} ({r['name_en']}): 总分 {r['total_score']} (Tier {r['tier']})\n"
+            f"  市场={d['market']['score']} 增速={d['growth']['score']} "
+            f"匹配={d['fit']['score']} 毛利={d['margin']['score']} "
+            f"壁垒={d['barrier']['score']} 出海={d['sea']['score']}"
+        )
+    sku_text = "\n".join(sku_summaries)
+
+    system_prompt = f"""你是赣丰玻纤的外贸选品顾问。根据以下 5 款 SKU 的 6 维评分结果，为每款生成简短的选品建议。
+
+评分维度：市场规模(25%) + 增速(20%) + 产线匹配(20%) + 毛利率(15%) + 认证壁垒(10%) + 出海易度(10%)
+
+SKU 评分数据：
+{sku_text}
+
+请为每款 SKU 输出一行 JSON，格式：
+{{"sku":"SKU编号","ai_reason":"一句话推荐理由（中文，30字内）","target_market":"目标市场（1-2个国家）","suggested_action":"建议动作（中文，20字内）"}}
+
+只输出 JSON 数组，不要其他文字。"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "请生成选品建议。"},
+    ]
+
+    try:
+        raw = chat_completion(messages, temperature=0.3, max_tokens=600)
+        if not raw:
+            logger.warning("AI insights: empty response")
+            return
+
+        # 提取 JSON（容错：去掉可能的 markdown 代码块标记）
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+        if clean.endswith("```"):
+            clean = clean.rsplit("```", 1)[0]
+        clean = clean.strip()
+
+        insights = json.loads(clean)
+        insight_map = {item["sku"]: item for item in insights}
+        for r in results:
+            if r["sku"] in insight_map:
+                ins = insight_map[r["sku"]]
+                r["ai_reason"] = ins.get("ai_reason", "")
+                r["target_market"] = ins.get("target_market", "")
+                r["suggested_action"] = ins.get("suggested_action", "")
+        logger.info("AI insights generated for %d SKUs", len(insight_map))
+    except Exception as e:
+        logger.error("AI insights generation failed: %s", e)
+
+
 def score_all() -> list[dict[str, Any]]:
     agg = DataAggregator()
     skus = _load_skus()
     results = [score_one(s, agg) for s in skus]
     results.sort(key=lambda x: x["total_score"], reverse=True)
+
+    # 用 DeepSeek 为 Top 5 生成 AI 推荐理由
+    _generate_ai_insights(results)
+
     return results
 
 

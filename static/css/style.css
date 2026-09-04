@@ -115,6 +115,21 @@ button{cursor:pointer;font-family:inherit;border:none;background:none}
 .sp-more{display:inline-block;color:var(--brand);font-weight:600;font-size:14px}
 .sp-more:hover{text-decoration:underline}
 
+/* ===== 4-Step Process ===== */
+.process-section{padding:80px 0;background:var(--bg)}
+.process-grid{display:flex;align-items:stretch;justify-content:center;gap:0;max-width:1040px;margin:0 auto}
+.process-step{flex:1;background:#fff;border-radius:16px;padding:34px 22px 28px;text-align:center;border:1px solid var(--line);position:relative;transition:.2s}
+.process-step:hover{transform:translateY(-4px);box-shadow:var(--shadow-lg);border-color:var(--brand)}
+.process-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:linear-gradient(90deg,var(--brand) 0%,var(--brand-2) 100%);color:#fff;font-size:11px;font-weight:700;padding:5px 12px;border-radius:14px;box-shadow:0 4px 12px rgba(30,107,255,.25)}
+.process-icon{font-size:44px;margin-bottom:14px}
+.process-step h3{font-size:17px;font-weight:700;margin-bottom:10px;color:var(--ink)}
+.process-step p{font-size:13px;color:var(--ink-2);margin:0;line-height:1.65}
+.process-arrow{display:flex;align-items:center;justify-content:center;width:48px;color:var(--brand);font-size:30px;font-weight:700;opacity:.7}
+@media(max-width:900px){
+  .process-grid{flex-direction:column;gap:18px;max-width:420px}
+  .process-arrow{transform:rotate(90deg);width:auto;height:20px}
+}
+
 /* ===== Section Common ===== */
 .section-head{text-align:center;margin-bottom:40px}
 .section-tag{display:inline-block;background:var(--warm-light);color:var(--warm);padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:.5px;margin-bottom:10px}
@@ -177,6 +192,7 @@ button{cursor:pointer;font-family:inherit;border:none;background:none}
 @media(max-width:700px){.form-row{grid-template-columns:1fr}}
 .form-group{margin-bottom:14px}
 .form-group label{display:block;font-size:13px;font-weight:600;color:var(--ink);margin-bottom:6px}
+.form-group label.required::after{content:" *";color:#ef4444}
 .form-group label span{color:#ef4444}
 .form-group input, .form-group select, .form-group textarea{
   width:100%;padding:11px 14px;border:1px solid var(--line);border-radius:10px;

@@ -192,7 +192,7 @@ def api_chat():
         return jsonify({"status": "error", "msg": "empty message"}), 400
 
     eng = ChatbotEngine()
-    out = eng.reply(msg, session_id)
+    out = eng.reply(msg, session_id, lang=payload.get("lang"))
 
     # 写入对话日志
     conn = sqlite3.connect(DB_FILE)

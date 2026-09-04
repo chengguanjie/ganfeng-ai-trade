@@ -29,14 +29,18 @@ async function sendChat(text){
   const typing = document.createElement('div');
   typing.className = 'msg msg-bot';
   typing.id = 'typing-indicator';
-  typing.innerHTML = '<div class="msg-content"><em>AI 正在输入...</em></div>';
+  const typingText = (window.GF_I18N && window.GF_CURRENT_LANG)
+    ? window.GF_I18N[window.GF_CURRENT_LANG()].chatTyping
+    : 'AI is typing...';
+  typing.innerHTML = '<div class="msg-content"><em>' + typingText + '</em></div>';
   document.getElementById('chat-messages').appendChild(typing);
 
   try{
+    const lang = (window.GF_CURRENT_LANG ? window.GF_CURRENT_LANG() : 'en');
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: text, session_id: SESSION_ID }),
+      body: JSON.stringify({ message: text, session_id: SESSION_ID, lang: lang }),
     });
     const data = await res.json();
     document.getElementById('typing-indicator').remove();

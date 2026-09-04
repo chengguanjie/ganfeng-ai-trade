@@ -1,30 +1,58 @@
 """
-赣丰玻纤 · 智能客服引擎（基于 RAG 的轻量版）
+赣丰玻纤 · 智能客服引擎（DeepSeek LLM + RAG）
 ==============================================
 
 输入：客户消息
-输出：意图 + 命中 FAQ + 推荐产品 + 自然语言回复（无 LLM 依赖，使用规则 + 模板）
+输出：意图 + 命中 FAQ + 自然语言回复
+
+架构：
+  1. 意图识别（规则关键词 → 快速分类）
+  2. RAG 检索（从 FAQ 知识库召回 top-3 相关条目）
+  3. DeepSeek LLM 生成回复（系统提示 + FAQ 上下文 + 用户消息）
+  4. 降级：LLM 不可用时回退到规则模板
 
 设计原则：
-- 完全离线运行（演示用）
-- LLM 接口预留（OPENAI_API_KEY 或 WorkBuddy 调用点）
 - 多语言：中英混合识别 + 自动切换回复
+- 完全离线降级（LLM 失败不影响服务）
 """
 from __future__ import annotations
 import json
 import os
 import re
-import random
+import logging
 from typing import Any
+
+logger = logging.getLogger("chatbot")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(THIS_DIR)
 FAQ_FILE = os.path.join(ROOT_DIR, "data", "faqs.json")
+SKU_FILE = os.path.join(ROOT_DIR, "data", "sku.json")
+
+from llm_client import chat_completion, is_available  # type: ignore
 
 
 def _load_faqs() -> list[dict[str, Any]]:
     with open(FAQ_FILE, "r", encoding="utf-8") as f:
         return json.load(f)["faqs"]
+
+
+def _load_sku_summary() -> str:
+    """加载 SKU 摘要供 LLM 参考"""
+    with open(SKU_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    lines = []
+    for p in data["products"]:
+        gram = p.get("gram", "")
+        mesh = p.get("mesh_size", "")
+        price = p.get("target_price_usd_per_sqm", p.get("target_price_usd_per_roll", ""))
+        moq = p.get("moq_rolls", "")
+        lead = p.get("lead_time_days", "")
+        lines.append(
+            f"  - {p['sku']}: {p['name_en']} | {gram}g | mesh {mesh} | "
+            f"price ~${price}/sqm | MOQ {moq} rolls | lead {lead} days"
+        )
+    return "\n".join(lines)
 
 
 # 意图关键词映射（多语种 + 容错）
@@ -34,7 +62,7 @@ INTENT_PATTERNS: dict[str, list[str]] = {
     "logistics": ["FOB", "CIF", "incoterms", "Incoterms", "物流", "运费", "shipping", "seafreight", "loading", "20GP", "40HQ", "transit", "海运"],
     "payment": ["T/T", "30/70", "L/C", "信用证", "付款", "payment", "付款方式", "OA"],
     "cert": ["证书", "认证", "ISO", "CE", "RoHS", "certification", "certifications"],
-    "spec_consult": ["克重", "gram", "spec", "规格", "参数", "抗拉", "tensile", "抗碱", "alkali", "spec", "specifications", "网孔"],
+    "spec_consult": ["克重", "gram", "spec", "规格", "参数", "抗拉", "tensile", "抗碱", "alkali", "specifications", "网孔"],
     "recommend": ["推荐", "recommend", "建议", "which mesh", "suitable", "what mesh", "推荐哪款", "推荐哪一款"],
     "oem": ["OEM", "定制", "private label", "custom", "贴牌", "白牌", "专有包装", "LOGO"],
     "supply": ["产能", "lead time", "交期", "capacity", "production", "年产能", "交期多久"],
@@ -73,7 +101,6 @@ def _find_best_faq(text: str, faqs: list[dict], top_n: int = 3) -> list[dict]:
     for faq in faqs:
         all_text = (faq.get("q_zh", "") + " " + faq.get("q_en", "") + " " + faq.get("a_zh", "")).lower()
         score = sum(1 for t in tokens if t in all_text)
-        # intent tag 命中也加分
         for tag in faq.get("tags", []):
             if tag in text_lc:
                 score += 0.5
@@ -82,8 +109,8 @@ def _find_best_faq(text: str, faqs: list[dict], top_n: int = 3) -> list[dict]:
     return [f for s, f in scored[:top_n] if s > 0]
 
 
-# 各意图对应的答复模板（合并 FAQ 知识）
-TEMPLATES = {
+# 降级模板（LLM 不可用时使用）
+FALLBACK_TEMPLATES = {
     "moq_quote": {
         "zh": "常规规格 MOQ 200 卷（≈1 个 20GP 集装箱），自粘带与定制产品 MOQ 500-1000 卷。\n\n😊 **新客户首单可享 100 卷试单 + 5 卷免费样品（DHL 运费由您承担）。**\n\n想直接进入询盘流程吗？",
         "en": "Standard SKU MOQ is 200 rolls (~one 20GP). Self-adhesive tape and custom products MOQ is 500-1000 rolls.\n\n😊 **New customers get a 100-roll trial + 5 free sample rolls (DHL paid by you).**\n\nWould you like to start a formal inquiry?",
@@ -127,24 +154,93 @@ TEMPLATES = {
 }
 
 
+def _build_rag_context(faqs: list[dict], sku_summary: str) -> str:
+    """构建 RAG 知识库上下文文本"""
+    faq_lines = []
+    for f in faqs:
+        faq_lines.append(f"Q: {f.get('q_en', f.get('q_zh', ''))}\nA: {f.get('a_zh', '')}")
+    return f"""=== PRODUCT CATALOG (12 SKU) ===
+{sku_summary}
+
+=== FAQ KNOWLEDGE BASE ===
+""" + "\n\n".join(faq_lines)
+
+
+def _build_system_prompt(lang: str, rag_context: str) -> str:
+    """构建 DeepSeek 系统提示"""
+    if lang == "zh":
+        return f"""你是赣丰玻纤（Ganfeng Fiberglass）的 AI 外贸客服。你的任务是回答海外买家关于玻纤网格布的问题。
+
+规则：
+1. 用中文回复（如果客户用英文则用英文回复）
+2. 回复要专业、简洁、友好，控制在 200 字以内
+3. 优先使用下方知识库中的信息回答
+4. 如果知识库没有覆盖，基于你对玻纤网格布行业的了解回答
+5. 如果客户询问报价或具体需求，引导客户提交询盘表单
+6. 不要编造价格、交期等具体数字，以知识库为准
+
+{rag_context}"""
+    else:
+        return f"""You are the AI customer service assistant for Ganfeng Fiberglass Mesh (赣丰玻纤), a Chinese factory exporting fiberglass mesh worldwide since 2008.
+
+Rules:
+1. Reply in English (unless the customer writes in Chinese, then reply in Chinese)
+2. Keep replies professional, concise, and friendly — under 150 words
+3. Use the knowledge base below as your primary source
+4. If the knowledge base doesn't cover it, use your industry knowledge about fiberglass mesh
+5. If the customer asks for a quote or specific requirements, guide them to submit an inquiry
+6. Do not fabricate prices, lead times, or specific numbers — rely on the knowledge base
+
+{rag_context}"""
+
+
 class ChatbotEngine:
     def __init__(self) -> None:
         self.faqs = _load_faqs()
+        self.sku_summary = _load_sku_summary()
+        self.rag_context = _build_rag_context(self.faqs, self.sku_summary)
 
-    def reply(self, user_msg: str, session_id: str | None = None) -> dict[str, Any]:
-        lang = _detect_lang(user_msg)
+    def reply(self, user_msg: str, session_id: str | None = None, lang: str | None = None) -> dict[str, Any]:
+        if not lang:
+            lang = _detect_lang(user_msg)
         intent, conf = _detect_intent(user_msg)
 
-        # 优先用模板回答（更可控）
-        if intent in TEMPLATES:
-            text = TEMPLATES[intent][lang]
+        # 尝试 LLM 回复
+        llm_reply = None
+        if is_available():
+            try:
+                # 检索 top-3 FAQ 作为 RAG 上下文增强
+                hits = _find_best_faq(user_msg, self.faqs, 3)
+                # 构建增强上下文：把命中的 FAQ 放在最前面
+                if hits:
+                    enhanced_rag = self.rag_context + "\n\n=== MOST RELEVANT FAQs ===\n"
+                    for h in hits:
+                        enhanced_rag += f"Q: {h.get('q_en', h.get('q_zh', ''))}\nA: {h.get('a_zh', '')}\n\n"
+                else:
+                    enhanced_rag = self.rag_context
+
+                system_prompt = _build_system_prompt(lang, enhanced_rag)
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ]
+
+                llm_reply = chat_completion(messages, temperature=0.6, max_tokens=500)
+                if llm_reply:
+                    logger.info("LLM reply OK (intent=%s, lang=%s, len=%d)", intent, lang, len(llm_reply))
+            except Exception as e:
+                logger.error("LLM reply failed: %s", e)
+                llm_reply = None
+
+        # 降级：LLM 不可用时用模板
+        if llm_reply:
+            text = llm_reply
+        elif intent in FALLBACK_TEMPLATES:
+            text = FALLBACK_TEMPLATES[intent][lang]
         else:
-            # 否则从 FAQ 命中
             hits = _find_best_faq(user_msg, self.faqs)
             if hits:
-                best = hits[0]
-                text = best["a_zh"] if lang == "zh" else best.get("a_zh", "")
-                # 英文版没有的话给中文
+                text = hits[0]["a_zh"]
             else:
                 text = (
                     "您好，我已记录您的问题，会转给外贸专员 24h 内回复。\n\n请问方便留下您的邮箱或 WhatsApp 吗？"
@@ -175,6 +271,7 @@ class ChatbotEngine:
             "language": lang,
             "matched_faq": [f.get("q_zh", "") for f in _find_best_faq(user_msg, self.faqs, 2)],
             "text": text,
+            "llm_used": llm_reply is not None,
         }
 
 
@@ -191,5 +288,5 @@ if __name__ == "__main__":
     for m in test_msgs:
         print(f"\nUSER: {m}")
         out = eng.reply(m)
-        print(f"BOT : {out['intent']} ({out['language']})")
-        print(f"     {out['text'][:120]}...")
+        print(f"BOT : intent={out['intent']} lang={out['language']} llm={out.get('llm_used', False)}")
+        print(f"     {out['text'][:200]}...")
