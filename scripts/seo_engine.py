@@ -450,7 +450,7 @@ def simulate_day() -> dict[str, Any]:
                 (path, _d(6)),
             )
             avg_i, avg_c = cur.fetchone() or (0, 0)
-            base_i = avg_i or 150
+            base_i = float(avg_i or 150)  # PG 的 AVG 返回 Decimal，需转 float
             impr = int(base_i * rng.uniform(0.9, 1.15) * (0.7 if today.weekday() >= 5 else 1.0))
             clicks = max(1, int(impr * rng.uniform(0.012, 0.03)))
             cur.execute(
@@ -458,7 +458,7 @@ def simulate_day() -> dict[str, Any]:
                      WHERE path = ? AND stat_date >= ?"""),
                 (path, _d(6)),
             )
-            prev_pos = cur.fetchone()[0] or 15.0
+            prev_pos = float(cur.fetchone()[0] or 15.0)  # 同上，Decimal → float
             pos = max(2.0, prev_pos * rng.uniform(0.96, 1.0))  # 缓慢改善
             cur.execute(
                 q("""INSERT INTO seo_daily (stat_date, path, impressions, clicks, position)
