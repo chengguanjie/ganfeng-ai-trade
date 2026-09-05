@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from flask import Flask, request, jsonify, render_template  # type: ignore
 
-from db import connect, q, insert_returning_id, backend_name  # type: ignore
+from db import connect, q, insert_returning_id, date_expr, backend_name  # type: ignore
 from init_db import bootstrap  # type: ignore
 from sourcing_engine import score_all  # type: ignore
 from chatbot_engine import ChatbotEngine  # type: ignore
@@ -515,15 +515,15 @@ def api_admin_sourcing_analysis():
 
             # 评分趋势（按天平均总分）
             cur.execute(
-                q("""SELECT SUBSTR(fetched_at, 1, 10) AS d, AVG(score_total)
-                     FROM sourcing_scores GROUP BY d ORDER BY d DESC LIMIT 14""")
+                q(f"""SELECT {date_expr('fetched_at')} AS d, AVG(score_total)
+                      FROM sourcing_scores GROUP BY d ORDER BY d DESC LIMIT 14""")
             )
             trend = [{"date": r[0], "avg_score": round(r[1], 2)} for r in cur.fetchall()][::-1]
 
             # 当前推荐位 + 发布日志
             cur.execute(q("SELECT sku FROM products WHERE featured = 1 ORDER BY featured_rank"))
             featured = [r[0] for r in cur.fetchall()]
-            cur.execute(q("SELECT skus, trigger, detail, created_at FROM publish_log ORDER BY id DESC LIMIT 5"))
+            cur.execute(q("SELECT skus, trigger_type, detail, created_at FROM publish_log ORDER BY id DESC LIMIT 5"))
             pub_log = [
                 {"skus": json.loads(r[0] or "[]"), "trigger": r[1],
                  "detail": json.loads(r[2] or "{}"), "created_at": str(r[3])[:16]}
@@ -587,7 +587,7 @@ def api_admin_publish_products():
                     (rank, sku),
                 )
             cur.execute(
-                q("""INSERT INTO publish_log (skus, trigger, detail)
+                q("""INSERT INTO publish_log (skus, trigger_type, detail)
                      VALUES (?,?,?)"""),
                 (json.dumps(skus, ensure_ascii=False), payload.get("trigger", "manual"),
                  json.dumps({"count": len(skus)}, ensure_ascii=False)),

@@ -108,6 +108,16 @@ def connect() -> Iterator[Any]:
         conn.close()
 
 
+def date_expr(col: str) -> str:
+    """把时间戳列裁成 YYYY-MM-DD 字符串。
+
+    SQLite 里 SUBSTR(ts,1,10) 可行，因为时间戳就是文本；Postgres 的
+    TIMESTAMP 是真正的时间类型，没有 substr(timestamp,int,int) 这个重载，
+    直接写 SUBSTR 会报 UndefinedFunction。按日聚合统一走这个函数。
+    """
+    return f"TO_CHAR({col}, 'YYYY-MM-DD')" if IS_PG else f"SUBSTR({col}, 1, 10)"
+
+
 def insert_returning_id(cur: Any, sql: str, params: tuple) -> int:
     """执行 INSERT 并返回自增主键，屏蔽 lastrowid / RETURNING 差异。"""
     if IS_PG:
@@ -260,7 +270,7 @@ SCHEMA_STATEMENTS = [
     f"""CREATE TABLE IF NOT EXISTS publish_log (
         id {_SERIAL},
         skus {_JSONCOL},
-        trigger TEXT,
+        trigger_type TEXT,
         detail {_JSONCOL},
         created_at {_TS}
     )""",
@@ -280,19 +290,50 @@ _COLUMN_MIGRATIONS = [
     ("inquiries", "ai_layer", "TEXT"),
 ]
 
+# 旧列名迁移：trigger 是 PostgreSQL 保留字，曾导致建表事务整体回滚
+_RENAME_MIGRATIONS = [
+    ("publish_log", "trigger", "trigger_type"),
+]
+
 
 def init_schema() -> None:
-    """建表（幂等）。"""
+    """建表 + 列迁移（幂等）。
+
+    列迁移必须每条独立事务。Postgres 里只要有一条语句报错，整个事务就进入
+    aborted 状态，后续语句全部失败，最后的 commit 实际等于 ROLLBACK —— 连
+    前面已经建好的表也会一起丢掉。原先把 ALTER 和 CREATE 放在同一事务、再用
+    `except: pass` 吞掉「列已存在」的报错，正是 seo_* 等 6 张表每次启动都建不
+    出来的原因（SQLite 没有这个语义，所以只在 Postgres 上暴露）。
+    """
     with connect() as conn:
         cur = conn.cursor()
         for stmt in SCHEMA_STATEMENTS:
             cur.execute(stmt)
-        # 轻量列迁移（幂等：已存在则忽略报错）
-        for table, column, coltype in _COLUMN_MIGRATIONS:
-            try:
-                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-            except Exception:
-                pass  # 列已存在
+
+    for table, column, coltype in _COLUMN_MIGRATIONS:
+        try:
+            with connect() as conn:
+                if IS_PG:
+                    conn.cursor().execute(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
+                else:
+                    conn.cursor().execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"
+                    )
+        except Exception as e:
+            logger.debug("列迁移跳过 %s.%s（多半是已存在）: %s", table, column, e)
+
+    # 保留字列名迁移（trigger → trigger_type；旧库已有数据时保住历史记录）
+    for table, old_col, new_col in _RENAME_MIGRATIONS:
+        try:
+            with connect() as conn:
+                conn.cursor().execute(
+                    f"ALTER TABLE {table} RENAME COLUMN {old_col} TO {new_col}"
+                )
+        except Exception as e:
+            logger.debug("改名迁移跳过 %s.%s: %s", table, old_col, e)
+
     logger.info("schema ready on %s", backend_name())
 
 

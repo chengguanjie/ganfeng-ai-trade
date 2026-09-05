@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from db import connect, q, insert_returning_id, IS_PG  # type: ignore
+from db import connect, q, insert_returning_id, date_expr, IS_PG  # type: ignore
 
 logger = logging.getLogger("chat-analytics")
 
@@ -206,8 +206,8 @@ def analytics() -> dict[str, Any]:
         # 每日会话趋势（14 天）
         cutoff = (datetime.now() - timedelta(days=13)).strftime("%Y-%m-%d")
         cur.execute(
-            q("""SELECT SUBSTR(created_at, 1, 10) AS d, COUNT(DISTINCT session_id)
-                 FROM chat_logs WHERE created_at >= ? GROUP BY d ORDER BY d"""),
+            q(f"""SELECT {date_expr('created_at')} AS d, COUNT(DISTINCT session_id)
+                  FROM chat_logs WHERE created_at >= ? GROUP BY d ORDER BY d"""),
             (cutoff,),
         )
         daily_sessions = [{"date": r[0], "sessions": r[1]} for r in cur.fetchall()]

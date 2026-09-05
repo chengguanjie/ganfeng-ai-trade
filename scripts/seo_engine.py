@@ -400,7 +400,8 @@ def auto_optimize(max_pages: int = 3) -> dict[str, Any]:
             )
             # 优化后模拟排名/CTR 温和改善（排名 + CTR 双提升，CTR 逐步脱离低点击阈值）
             cur.execute(
-                q("""UPDATE seo_daily SET position = MAX(2.0, position * 0.97)
+                q("""UPDATE seo_daily SET position = CASE
+                         WHEN position * 0.97 < 2.0 THEN 2.0 ELSE position * 0.97 END
                      WHERE path = ? AND stat_date >= ?"""),
                 (page["path"], _d(1)),
             )
